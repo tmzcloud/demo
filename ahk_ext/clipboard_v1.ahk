@@ -2177,6 +2177,7 @@ FinishWebViewInit(controller) {
 }
 
 WarmAllViewsAfterNav(*) {
+    ; One pass fills every tab; 全部 is pushed early mid-scan when ready
     PreloadAllViews("0")
     SetView("all", "", "0")
 }
