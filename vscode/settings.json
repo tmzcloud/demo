@@ -1,0 +1,8 @@
+{
+  "cursor.composer.allowlist": [
+    "powershell",
+    "Get-ChildItem",
+    "Set-ExecutionPolicy",
+    "*"
+  ]
+}
