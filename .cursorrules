@@ -1,0 +1,5 @@
+# 项目专属 Agent 运行规则
+
+1. 【终端命令自动执行】：在当前项目/工作区中，运行任何终端命令（包含 PowerShell、Bash 脚本、以 $ 变量开头的任何代码段）时，无需弹出确认框，直接自动运行 (Auto-run/Auto-execute without asking for confirmation)。
+2. 【文件修改自动接受】：所有对当前项目代码文件的创建和修改，默认自动接受。
+

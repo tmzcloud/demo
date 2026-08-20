@@ -20,7 +20,6 @@
         MsgBox("拼接出的项目路径在本地不存在！`n路径: " projectPath, "路径无效", "Icon!")
         return
     }
-
     targetDevelop := "develop"
     targetStaging := "staging"
 
