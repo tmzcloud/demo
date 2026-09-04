@@ -5,16 +5,21 @@
 ; 只有当 GoLand 窗口处于激活状态时才生效
 #HotIf WinActive("ahk_exe goland64.exe")
 
+; 多仓统一放在此目录下（每个子文件夹一个 git 仓库）
+global GOLAND_WORKSPACE := "E:\dev\goland project"
+
 ; 输入 ?merge 并按下【空格】或【回车】触发
 ::?merge:: {
-    ; 1. 获取当前激活窗口的标题并提取项目名称
+    global GOLAND_WORKSPACE
+    ; 1. 先从标题猜子仓；猜不到就弹列表（多仓挂在同一 GoLand 工程时标题常只有文件名）
     title := WinGetTitle("A")
-    if (!RegExMatch(title, "^([a-zA-Z0-9_\-]+)", &match)) {
-        MsgBox("无法从当前窗口标题中解析出项目名称！`n标题: " title, "错误", "Icon!")
-        return
+    projectName := ResolveGolandProjectFromTitle(title, GOLAND_WORKSPACE)
+    if (projectName = "") {
+        projectName := PickGolandProject(GOLAND_WORKSPACE, title)
+        if (projectName = "")
+            return
     }
-    projectName := match[1]
-    projectPath := "E:\dev\goland project\" . projectName
+    projectPath := GOLAND_WORKSPACE "\" projectName
 
     if (!DirExist(projectPath)) {
         MsgBox("拼接出的项目路径在本地不存在！`n路径: " projectPath, "路径无效", "Icon!")
@@ -237,5 +242,204 @@ WinCenter(WinTitle) {
     targetY := mTop + ( (mBottom - mTop - wHeight) / 2 )
     WinMove(targetX, targetY, , , WinTitle)
     WinActivate(WinTitle)
+}
+
+/**
+ * 列出工作区下带 .git 的子目录（按名称排序，便于人工挑选）。
+ */
+ListGolandGitProjects(workspace) {
+    workspace := RTrim(String(workspace), "\/")
+    names := []
+    if workspace = "" || !DirExist(workspace)
+        return names
+    loop files workspace "\*", "D" {
+        name := A_LoopFileName
+        if name = "" || SubStr(name, 1, 1) = "."
+            continue
+        if !DirExist(workspace "\" name "\.git") && !FileExist(workspace "\" name "\.git")
+            continue
+        names.Push(name)
+    }
+    if names.Length < 2
+        return names
+    ; 简单冒泡按字母序
+    loop names.Length - 1 {
+        i := 1
+        while i <= names.Length - A_Index {
+            if StrCompare(names[i], names[i + 1], "Off") > 0 {
+                tmp := names[i]
+                names[i] := names[i + 1]
+                names[i + 1] := tmp
+            }
+            i += 1
+        }
+    }
+    return names
+}
+
+/**
+ * 从 GoLand 标题里匹配工作区下的子项目目录名。
+ * 优先最长匹配（避免 catalog 误伤 catalog-grpc）。
+ */
+ResolveGolandProjectFromTitle(title, workspace) {
+    title := String(title)
+    names := ListGolandGitProjects(workspace)
+    if !names.Length
+        return ""
+
+    ; 长名优先
+    byLen := names.Clone()
+    loop byLen.Length - 1 {
+        i := 1
+        while i <= byLen.Length - A_Index {
+            if StrLen(byLen[i]) < StrLen(byLen[i + 1]) {
+                tmp := byLen[i]
+                byLen[i] := byLen[i + 1]
+                byLen[i + 1] := tmp
+            }
+            i += 1
+        }
+    }
+
+    titleLower := StrLower(title)
+    for name in byLen {
+        n := StrLower(name)
+        esc := RegExReplace(n, "([.\\+*?^$|(){}\[\]\\])", "\$1")
+        if RegExMatch(titleLower, "(^|[^a-z0-9_.-])" esc "([^a-z0-9_.-]|$)")
+            return name
+    }
+    return ""
+}
+
+/**
+ * 标题猜不出时，弹出可搜索列表让用户选仓。
+ * 返回目录名；取消则返回空字符串。
+ *
+ * 导航说明：快捷键4 已全局占用 Ctrl+I/J（分别 Send Up / Left），
+ * 本窗不能再注册 ^i/^j，改为拦截到达窗口的方向键：
+ *   Up / Ctrl+I→Up     → 上一项
+ *   Down / Ctrl+K→Down → 下一项
+ *   Left / Ctrl+J→Left → 下一项（兼容你的 Ctrl+J 习惯）
+ */
+PickGolandProject(workspace, title := "") {
+    names := ListGolandGitProjects(workspace)
+    if !names.Length {
+        MsgBox("工作区下没有找到任何 git 子项目。`n工作区: " workspace, "路径无效", "Icon!")
+        return ""
+    }
+
+    picked := ""
+    navBound := false
+    keyHandler := ""
+
+    g := Gui("+AlwaysOnTop +Resize", "选择要 merge 的项目")
+    g.SetFont("s10", "Segoe UI")
+    g.AddText(, "请选择项目（↑↓ / Ctrl+I 上、Ctrl+J 下，回车确定）：")
+    if title != ""
+        g.AddText("w420 c666666", "标题: " title)
+    g.AddText(, "筛选:")
+    editFilter := g.AddEdit("w420 vFilter")
+    lb := g.AddListBox("w420 r16 vProjList")
+    for n in names
+        lb.Add([n])
+
+    btnOk := g.AddButton("w200 Default", "确定")
+    btnCancel := g.AddButton("x+20 w200", "取消")
+
+    ListBoxCount() {
+        return SendMessage(0x18B, 0, 0, lb) ; LB_GETCOUNT
+    }
+
+    MoveSel(delta) {
+        count := ListBoxCount()
+        if count < 1
+            return
+        idx := lb.Value
+        if idx < 1
+            idx := 1
+        idx += delta
+        if idx < 1
+            idx := 1
+        if idx > count
+            idx := count
+        lb.Choose(idx)
+    }
+
+    ApplyFilter(*) {
+        lb.Delete()
+        needle := StrLower(Trim(editFilter.Value))
+        shown := 0
+        for n in names {
+            if needle = "" || InStr(StrLower(n), needle) {
+                lb.Add([n])
+                shown += 1
+            }
+        }
+        if shown > 0
+            lb.Choose(1)
+    }
+
+    ; 吃掉「快捷键4 翻译后的方向键」，不依赖本脚本注册 ^i/^j
+    OnPickerKeyDown(wParam, lParam, msg, hwnd) {
+        if !WinActive("ahk_id " g.Hwnd)
+            return
+        if hwnd != g.Hwnd && !DllCall("IsChild", "ptr", g.Hwnd, "ptr", hwnd)
+            return
+        switch wParam {
+            case 0x26: ; VK_UP（含 Ctrl+I → Up）
+                MoveSel(-1)
+                return 0
+            case 0x28: ; VK_DOWN（含 Ctrl+K → Down）
+                MoveSel(1)
+                return 0
+            case 0x25: ; VK_LEFT（含 Ctrl+J → Left）→ 当作下移
+                MoveSel(1)
+                return 0
+        }
+    }
+
+    TeardownNav() {
+        if !navBound
+            return
+        try OnMessage(0x100, keyHandler, 0) ; WM_KEYDOWN off
+        navBound := false
+        keyHandler := ""
+    }
+
+    Confirm(*) {
+        if lb.Value = 0 {
+            MsgBox("请先选中一个项目。", "提示", "Icon!")
+            return
+        }
+        picked := lb.Text
+        TeardownNav()
+        g.Destroy()
+    }
+
+    Cancel(*) {
+        picked := ""
+        TeardownNav()
+        g.Destroy()
+    }
+
+    editFilter.OnEvent("Change", ApplyFilter)
+    lb.OnEvent("DoubleClick", Confirm)
+    btnOk.OnEvent("Click", Confirm)
+    btnCancel.OnEvent("Click", Cancel)
+    g.OnEvent("Close", Cancel)
+    g.OnEvent("Escape", Cancel)
+
+    lb.Choose(1)
+    g.Show()
+    WinCenter("ahk_id " g.Hwnd)
+
+    keyHandler := OnPickerKeyDown
+    OnMessage(0x100, keyHandler) ; WM_KEYDOWN
+    navBound := true
+
+    editFilter.Focus()
+    WinWaitClose("ahk_id " g.Hwnd)
+    TeardownNav()
+    return picked
 }
 #HotIf
