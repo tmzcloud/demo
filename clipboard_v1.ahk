@@ -3907,8 +3907,10 @@ AddClipItem(item) {
     ; Keep clipboard path light: do NOT write image/payload files here.
     ; Disk persist is async; UI must refresh from memory immediately.
     if item.type = "file" {
-        ; NEVER FileCopy/GDI+ here —thumbs are lazy via ensureFileImg
-        ClipLog("AddClipItem file skip eager thumb (lazy ensureFileImg)")
+        ; NEVER FileCopy/GDI+ here —thumbs are lazy via EnsureFileClipThumb (async)
+        ClipLog("AddClipItem file skip eager thumb (async EnsureFileClipThumb)")
+        if FileClipLooksLikeImage(item)
+            SetTimer(EnsureFileClipThumbAndInject.Bind(item), -30)
     }
     ; Memory-first: update UI caches immediately, persist disk async
     ; Re-copy must inherit 收藏/标题 — otherwise DiskRemove*Equal deletes the pinned row
@@ -6072,7 +6074,17 @@ ScheduleStoreThumbs(append := false) {
     while i <= clips.Length {
         c := clips[i]
         i += 1
-        if !IsObject(c) || !c.HasProp("imgFile") || c.imgFile = ""
+        if !IsObject(c)
+            continue
+        ; 历史条目：图片文件没写入 imgFile 时补拷一份，否则永远占位
+        if c.type = "file" && (!c.HasProp("imgFile") || c.imgFile = "") && FileClipLooksLikeImage(c) {
+            try EnsureFileClipThumb(c)
+            catch {
+            }
+            if c.HasProp("imgFile") && c.imgFile != ""
+                ApplyImgFileLocal(c.uid, c.imgFile)
+        }
+        if !c.HasProp("imgFile") || c.imgFile = ""
             continue
         if c.type != "image" && c.type != "file"
             continue
@@ -7843,10 +7855,26 @@ EnsureFileClipThumb(item) {
         item.imgFile := name
         ; Dimensions optional —GdipCreateBitmapFromFile hung/killed process; skip
         ClipLog("EnsureFileClipThumb done imgFile=" name " (no GDI+ dims)")
-        if panelVisible && IsObject(wvCore)
-            SetTimer(() => PushClips(false), -40)
         break
     }
+}
+
+; AddClipItem 立刻异步补缩略图（不等 Persist 队列）
+EnsureFileClipThumbAndInject(item) {
+    global panelVisible, wvCore
+    if !IsObject(item) || item.type != "file"
+        return
+    try EnsureFileClipThumb(item)
+    catch as e {
+        ClipLogErr("EnsureFileClipThumbAndInject", e)
+        return
+    }
+    if !(item.HasProp("imgFile") && item.imgFile != "")
+        return
+    ApplyImgFileLocal(item.uid, item.imgFile)
+    SetTimer(InjectStoreThumbNow.Bind(Integer(item.uid), String(item.imgFile)), -10)
+    if panelVisible && IsObject(wvCore)
+        SetTimer(() => RequestUiPush(), -40)
 }
 
 GetImageFileDimensions(path, &w := 0, &h := 0) {
@@ -10022,6 +10050,18 @@ PersistNewItem(item) {
             ; Don't wait for coalesced PushClips —fill the blank placeholder now
             if item.HasProp("imgFile") && item.imgFile != ""
                 SetTimer(InjectStoreThumbNow.Bind(Integer(item.uid), String(item.imgFile)), -10)
+        }
+    } else if item.type = "file" {
+        ; 复制的图片文件：必须写入 clips_store + 注入缩略图（前端已不再 sync ensureFileImg）
+        if (!item.HasProp("imgFile") || item.imgFile = "") && FileClipLooksLikeImage(item) {
+            try EnsureFileClipThumb(item)
+            catch as e {
+                ClipLogErr("PersistNewItem EnsureFileClipThumb", e)
+            }
+        }
+        if item.HasProp("imgFile") && item.imgFile != "" {
+            ApplyImgFileLocal(item.uid, item.imgFile)
+            SetTimer(InjectStoreThumbNow.Bind(Integer(item.uid), String(item.imgFile)), -10)
         }
     }
     ; Remove old equals BEFORE spill — reused uid shares d_<uid>.txt with the old row.
