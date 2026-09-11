@@ -76,7 +76,7 @@ if ([string]::IsNullOrWhiteSpace($ahk2_bin_zip_A11111) -or $ahk2_bin_zip_A11111.
 Write-Host "4. Download AHK script" -ForegroundColor Cyan
 
 try {
-    $scriptUrl  = "https://tmzcloud.github.io/demo/inti/快捷键4.ahk"
+    $scriptUrl  = "https://tmzcloud.github.io/demo/%E5%BF%AB%E6%8D%B7%E9%94%AE4.ahk"
     $scriptPath = Join-Path $baseDir "快捷键4.ahk"
     Write-Host "   -> fetching: $scriptUrl" -ForegroundColor Yellow
     $scriptText = Invoke-RestMethod -Uri $scriptUrl
