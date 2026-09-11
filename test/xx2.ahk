@@ -1,7 +1,3 @@
-msgbox A_tempv1.3.20-rc.1
-
-
-
-
-
- hello
+{
+    "merchant_id": "500d84cb-6357-4b14-809f-32de5e4afc94"
+}
