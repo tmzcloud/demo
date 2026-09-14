@@ -4463,6 +4463,12 @@ global wv      := ""
 global wvCore  := ""
 global lastTxt := ""
 global lastImg := ""
+global lastImageFileClipAt := 0     ; Explorer 右键复制图片文件：HDROP 与位图连发时只留一条
+global lastClipImageAt := 0         ; 最近一次 type=image 写入历史
+global lastFileClipKey := ""        ; 同一次复制连发 ClipChanged 时去重（微信等）
+global lastFileClipAt := 0
+global clipChangePendingType := 0   ; 剪贴板变更防抖：合并连发事件
+global clipChangeBusy := false       ; 禁止 ClipChangedSafe 重入
 global uiPinned := false
 global prevActiveWin := 0
 global clipIgnore := false
@@ -4600,7 +4606,7 @@ ClipPanelIsUp(*) {
 ;  Clipboard
 ; =================================================
 ClipChanged(dataType) {
-    global lastTxt, lastImg, clipIgnore, clipReady, diskScanBusy
+    global clipIgnore, clipReady, diskScanBusy, clipChangePendingType
     if clipIgnore || dataType = 0
         return
     ; Not ready yet (boot) —ignore; EnableClipboardWatch arms after InitClipsFromDisk
@@ -4615,15 +4621,46 @@ ClipChanged(dataType) {
         SetTimer(() => ClipChanged(dt), -500)
         return
     }
-    ClipLog("ClipChanged ENTER type=" dataType)
-    try ClipChangedSafe(dataType)
+    ; 微信/Explorer 一次复制会连发多次 OnClipboardChange —防抖后只处理一次
+    clipChangePendingType := Integer(dataType)
+    SetTimer(ProcessClipChangedDebounced, 0)
+    SetTimer(ProcessClipChangedDebounced, -120)
+}
+
+ProcessClipChangedDebounced(*) {
+    global clipChangePendingType, clipIgnore, clipReady, diskScanBusy
+    if clipIgnore || !clipReady
+        return
+    if diskScanBusy {
+        SetTimer(ProcessClipChangedDebounced, -500)
+        return
+    }
+    dt := clipChangePendingType
+    ClipLog("ClipChanged debounced ENTER type=" dt)
+    try ClipChangedSafe(dt)
     catch as e {
         ClipLogErr("ClipChanged", e)
     }
-    ClipLog("ClipChanged EXIT type=" dataType)
+    ClipLog("ClipChanged debounced EXIT type=" dt)
 }
 
 ClipChangedSafe(dataType) {
+    global lastTxt, lastImg, clipIgnore, clipChangeBusy
+    if clipIgnore
+        return
+    if clipChangeBusy {
+        ClipLog("ClipChangedSafe SKIP reentrant type=" dataType)
+        return
+    }
+    clipChangeBusy := true
+    try {
+        ClipChangedSafeCore(dataType)
+    } finally {
+        clipChangeBusy := false
+    }
+}
+
+ClipChangedSafeCore(dataType) {
     global lastTxt, lastImg, clipIgnore
     if clipIgnore
         return
@@ -4635,6 +4672,9 @@ ClipChangedSafe(dataType) {
     hasDib   := DllCall("IsClipboardFormatAvailable", "UInt", 8, "Int")
     hasDib5  := DllCall("IsClipboardFormatAvailable", "UInt", 17, "Int")
     hasImg   := hasBmp || hasDib || hasDib5 || (dataType = 2)
+    ; Explorer 右键复制图片：CF_HDROP + 位图同时存在 → 只走 file 分支
+    if hasFiles && hasImg && ClipboardHasOnlyImageFiles()
+        hasImg := false
     ClipLog("ClipChanged formats files=" hasFiles " img=" hasImg " bmp=" hasBmp " dib=" hasDib " type=" dataType)
 
     item := { time: FormatTime(, "yyyy-MM-dd HH:mm:ss"), pinned: false, pasted: false }
@@ -4671,6 +4711,19 @@ ClipChangedSafe(dataType) {
         item.fileCount := names.Length
         item.charCount := 0
         ClipLog("ClipChanged file path0=" SubStr(names[1], 1, 120))
+        global lastFileClipKey, lastFileClipAt, lastImageFileClipAt
+        fkey := FileClipKey(raw)
+        if fkey != "" && fkey = lastFileClipKey && (A_TickCount - lastFileClipAt) < 1500 {
+            ClipLog("ClipChanged skip duplicate file burst")
+            return
+        }
+        ; 右键复制图片文件：位图可能先到，此处去掉重复的 image 条
+        if ClipboardPathsAllImage(names) {
+            MemoryDropBurstFrontImage()
+            lastImageFileClipAt := A_TickCount
+        }
+        lastFileClipKey := fkey
+        lastFileClipAt := A_TickCount
         ApplyClipSrc(item)
         AddClipItem(item)
         return
@@ -4690,6 +4743,14 @@ ClipChangedSafe(dataType) {
     }
 
     if hasImg {
+        ; 第二次 OnClipboardChange：剪贴板仍带图片路径时不再记位图
+        if ClipboardHasOnlyImageFiles()
+            return
+        global lastImageFileClipAt
+        if lastImageFileClipAt && (A_TickCount - lastImageFileClipAt) < 900 {
+            ClipLog("ClipChanged skip image — recent image-file clip")
+            return
+        }
         ClipLog("ClipChanged branch=image ClipImageToBase64")
         img := ClipImageToBase64(&w, &h)
         ClipLog("ClipChanged image b64Len=" StrLen(img) " w=" w " h=" h)
@@ -4831,7 +4892,7 @@ TextLooksLikeMarkdown(txt) {
 }
 
 AddClipItem(item) {
-    global clips, wvCore, STORE_DIR, lastTxt, pasteQueueMode, pasteQueueIds, queueCaptureArmed
+    global clips, wvCore, STORE_DIR, lastTxt, lastClipImageAt, pasteQueueMode, pasteQueueIds, queueCaptureArmed
     ClipLog("AddClipItem begin type=" item.type)
     if !item.HasProp("uid") || !item.uid
         item.uid := NextClipUid()
@@ -4881,6 +4942,8 @@ AddClipItem(item) {
         if FileClipLooksLikeImage(item) && !(item.HasProp("imgFile") && item.imgFile != "")
             SetTimer(EnsureFileClipThumbAndInject.Bind(item), -30)
     }
+    if item.type = "image"
+        lastClipImageAt := A_TickCount
     ClipLog("AddClipItem MemoryInsertFront")
     MemoryInsertFront(item)
     ; Queue: Ctrl+Shift+C 入队；其它来源的剪贴板新增 → 结束队列
@@ -9743,6 +9806,43 @@ PreviewLooksLikeImagePath(raw) {
     SplitPath ln, , , &ext
     ext := StrLower(ext)
     return ext != "" && InStr(imgExt, " " ext " ")
+}
+
+; 路径列表是否全是图片文件（Explorer 右键复制单/多张图）
+ClipboardPathsAllImage(names) {
+    if !IsObject(names) || names.Length < 1
+        return false
+    for ln in names {
+        if !PreviewLooksLikeImagePath(ln)
+            return false
+    }
+    return true
+}
+
+; 剪贴板当前是否仅为图片文件的 CF_HDROP（常伴随位图/DIB 再触发一次）
+ClipboardHasOnlyImageFiles() {
+    if !DllCall("IsClipboardFormatAvailable", "UInt", 15, "Int")
+        return false
+    return ClipboardPathsAllImage(GetClipboardFileList())
+}
+
+; 位图先到、文件路径后到时：去掉刚写入的 image 条，只保留 file
+MemoryDropBurstFrontImage(maxAgeMs := 900) {
+    global lastClipImageAt, liveFront, clips
+    if !lastClipImageAt || (A_TickCount - lastClipImageAt) > maxAgeMs
+        return false
+    for src in [liveFront, clips] {
+        if !IsObject(src) || src.Length < 1
+            continue
+        c := src[1]
+        if !IsObject(c) || c.type != "image"
+            continue
+        MemoryRemoveUid(c.uid)
+        ClipLog("MemoryDropBurstFrontImage uid=" c.uid)
+        RequestUiPush()
+        return true
+    }
+    return false
 }
 
 JsonFieldInt(line, key) {
