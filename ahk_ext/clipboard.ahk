@@ -4661,7 +4661,7 @@ ClipChangedSafe(dataType) {
 }
 
 ClipChangedSafeCore(dataType) {
-    global lastTxt, lastImg, clipIgnore
+    global lastTxt, lastImg, clipIgnore, queueCaptureArmed
     if clipIgnore
         return
     ; Brief settle so clipboard formats are ready (too long blocked UI updates)
@@ -4754,7 +4754,9 @@ ClipChangedSafeCore(dataType) {
         ClipLog("ClipChanged branch=image ClipImageToBase64")
         img := ClipImageToBase64(&w, &h)
         ClipLog("ClipChanged image b64Len=" StrLen(img) " w=" w " h=" h)
-        if img != "" && img != lastImg {
+        if img != "" {
+            if img = lastImg && !queueCaptureArmed && !ClipContentAlreadyInPasteQueue({ type: "image", data: img })
+                return
             lastImg := img
             item.type := "image"
             item.data := img
@@ -4798,8 +4800,10 @@ ClipChangedSafeCore(dataType) {
             ctrlMouseCopyUntil := 0  ; one shot per click
             ClipLog("PasteQueue Ctrl-click armed n=" pasteQueueIds.Length)
         }
-        ; Queue capture must accept even duplicate text (lastTxt), else ^+c feels "dead"
-        if txt = "" || (txt = lastTxt && !queueCaptureArmed)
+        ; Queue capture / 已在队列：即使 lastTxt 相同也要新条目，否则 MemoryTake 会撕裂 FIFO
+        if txt = ""
+            return
+        if txt = lastTxt && !queueCaptureArmed && !ClipContentAlreadyInPasteQueue({ type: "text", data: txt })
             return
         lastTxt := txt
         item.type := "text"
@@ -4903,37 +4907,31 @@ AddClipItem(item) {
         ; NEVER FileCopy/GDI+ here —thumbs are lazy via EnsureFileClipThumb (async)
         ClipLog("AddClipItem file skip eager thumb (async EnsureFileClipThumb)")
     }
-    ; 相同内容已在粘贴队列中：不要 MemoryTake+前置。否则会把队列中间项抽到最前，撕裂 FIFO 连线。
-    if ClipContentAlreadyInPasteQueue(item) {
-        ClipLog("AddClipItem skip front — equal content already in paste queue type=" item.type)
-        if item.type = "text"
-            lastTxt := item.data
-        if queueCaptureArmed {
-            queueCaptureArmed := false
-            ShowQueueTip("已在队列", "", 700)
-        }
-        return
+    ; 已在最近粘贴队列：必须新 uid 新条目，禁止 MemoryTake/跳过。
+    ; 否则会把队列中间项抽到最前，撕裂 FIFO 连线。
+    keepQueueDup := queueCaptureArmed || ClipContentAlreadyInPasteQueue(item)
+    if keepQueueDup {
+        ClipLog("AddClipItem keep duplicate for queue type=" item.type " armed=" queueCaptureArmed)
     }
     ; Memory-first: update UI caches immediately, persist disk async
     ; Re-copy must inherit 收藏/标题 — otherwise DiskRemove*Equal deletes the pinned row
     ; and inserts a fresh unpinned clone (favorites appear "lost").
-    ; EXCEPTION: queue capture needs a DISTINCT uid per FIFO slot. Collapsing onto an older
-    ; equal-text row (MemoryTake + Inherit uid) is what turned 3 queue items into 2.
+    ; EXCEPTION: queue capture / 队列内重复 → DISTINCT uid，不要 Inherit。
     if item.type = "text" {
-        if !queueCaptureArmed {
+        if !keepQueueDup {
             old := MemoryTakeTextEqual(item.data)
             InheritClipMeta(item, old)
         }
         lastTxt := item.data
     } else if item.type = "link" {
-        if !queueCaptureArmed {
+        if !keepQueueDup {
             old := MemoryTakeLinkEqual(item.data)
             InheritClipMeta(item, old)
             if IsObject(old) && old.HasProp("linkTitle") && old.linkTitle != ""
                 item.linkTitle := old.linkTitle
         }
     } else if item.type = "file" {
-        if !queueCaptureArmed {
+        if !keepQueueDup {
             old := MemoryTakeFileEqual(item.data)
             InheritClipMeta(item, old)
             if IsObject(old) && old.HasProp("imgFile") && old.imgFile != "" && !(item.HasProp("imgFile") && item.imgFile != "")
@@ -13239,15 +13237,6 @@ QueueCopyCatchup(gen) {
     }
     if txt = ""
         return
-    ; 已在队列中的相同文本：不再强制前置/再入队，避免撕裂 FIFO
-    probe := { type: "text", data: txt }
-    if ClipContentAlreadyInPasteQueue(probe) {
-        queueCaptureArmed := false
-        lastTxt := txt
-        ClipLog("PasteQueue catchup skip — already in queue len=" StrLen(txt))
-        ShowQueueTip("已在队列", "", 700)
-        return
-    }
     ClipLog("PasteQueue catchup force-add len=" StrLen(txt))
     ; Allow duplicate of lastTxt — this path exists specifically for unchanged clipboard
     item := {
@@ -13274,7 +13263,7 @@ QueueCopyCatchup(gen) {
     RequestUiPush()
 }
 
-; 当前 FIFO 队列里是否已有与 item 内容相同的条目（用于禁止再前置撕裂队列）
+; 当前 FIFO 队列里是否已有与 item 内容相同的条目
 ClipContentAlreadyInPasteQueue(item) {
     global pasteQueueMode, pasteQueueIds
     if !IsObject(item) || !pasteQueueMode || !IsObject(pasteQueueIds) || !pasteQueueIds.Length
@@ -13285,9 +13274,12 @@ ClipContentAlreadyInPasteQueue(item) {
         return false
     for id in pasteQueueIds {
         c := ResolveClip(Integer(id))
-        if !IsObject(c)
+        if !IsObject(c) || c.type != typ || !c.HasProp("data")
             continue
-        if c.type = typ && c.HasProp("data") && c.data = data
+        if typ = "file" {
+            if FileClipDataEqual(c.data, data)
+                return true
+        } else if c.data = data
             return true
     }
     return false
