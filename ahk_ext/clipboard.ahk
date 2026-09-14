@@ -1,14 +1,316 @@
 ﻿#Requires AutoHotkey v2.0
-#NoTrayIcon
-#Include %A_Temp%\WebView2.ahk
 #SingleInstance Force
+#NoTrayIcon
 #UseHook
 Persistent
+; 独立启动：lib\webview2 已有则静默后台；缺失才弹下载进度窗，下完重启 #Include
+; 相对路径 Include（勿用 "%A_ScriptDir%\..."，部分 AHK 会失败）
+#Include *i lib\webview2\WebView2.ahk
 
 ; 勿在此强制 RunAs：UAC 取消会直接 ExitApp；与快捷键4共存请两边都以管理员启动（或都不提权）。
 ; 清掉残留的系统忙碌光标（其它脚本 / 长时间磁盘任务会留下转圈）
 try DllCall("SystemParametersInfo", "UInt", 0x57, "UInt", 0, "Ptr", 0, "UInt", 0) ; SPI_SETCURSORS
 
+; ── 独立运行托盘；快捷键4 传 hosted 则静默 ───────────────────────────
+global clipboardHosted := ClipArgsHas("hosted")
+global clipboardStandalone := !clipboardHosted
+global clipboardTrayVisible := false
+global clipBootGui := 0
+global clipBootStatusCtrl := 0
+global clipBootPctCtrl := 0
+global clipBootExitOnClose := true
+; 仅「正在下载 WebView2」时才弹进度窗；日常启动不弹
+global clipBootAllowUi := false
+
+ClipArgsHas(name) {
+    name := StrLower(String(name))
+    for a in A_Args {
+        if StrLower(String(a)) = name
+            return true
+    }
+    return false
+}
+
+ClipSetupStandaloneTray(*) {
+    global clipboardStandalone, clipboardTrayVisible
+    if !clipboardStandalone {
+        clipboardTrayVisible := false
+        return
+    }
+    try {
+        A_IconHidden := false
+        TraySetIcon("shell32.dll", 261)
+        A_TrayMenu.Delete()
+        A_TrayMenu.Add("显示剪贴板", (*) => ShowPanel())
+        A_TrayMenu.Add("清空历史", (*) => ClearAll())
+        A_TrayMenu.Add()
+        A_TrayMenu.Add("退出", (*) => ExitApp())
+        A_TrayMenu.Default := "显示剪贴板"
+        A_IconTip := "剪贴板  (Win+V)"
+        clipboardTrayVisible := !A_IconHidden
+    } catch {
+        clipboardTrayVisible := false
+    }
+    if !clipboardTrayVisible
+        ClipEnsureNoTrayExitWindow()
+}
+
+ClipEnsureNoTrayExitWindow(*) {
+    global clipBootGui, clipBootStatusCtrl, clipBootPctCtrl, clipBootExitOnClose
+    if IsObject(clipBootGui)
+        return
+    clipBootExitOnClose := true
+    g := Gui("+AlwaysOnTop -MinimizeBox", "剪贴板")
+    g.SetFont("s10", "Segoe UI")
+    g.Add("Text", "w360", "托盘图标未能显示。窗口关闭即退出进程。")
+    clipBootStatusCtrl := g.Add("Text", "w360 vBootStatus", "运行中… Win+V 唤出")
+    clipBootPctCtrl := g.Add("Progress", "w360 h16 Range0-100", 100)
+    g.OnEvent("Close", ClipBootOnClose)
+    g.Show("AutoSize Center")
+    clipBootGui := g
+}
+
+ClipBootOnClose(*) {
+    global clipBootExitOnClose
+    if clipBootExitOnClose
+        ExitApp
+}
+
+; 仅 clipBootAllowUi=true（缺组件下载中）才弹窗
+ClipBootShow(msg, pct := 0) {
+    global clipBootGui, clipBootStatusCtrl, clipBootPctCtrl, clipBootExitOnClose
+    global clipboardStandalone, clipboardHosted, clipBootAllowUi
+    if !clipBootAllowUi || clipboardHosted || !clipboardStandalone
+        return
+    pct := Max(0, Min(100, Integer(pct)))
+    clipBootExitOnClose := true
+    if !IsObject(clipBootGui) {
+        g := Gui("+AlwaysOnTop -MinimizeBox +MinSize", "剪贴板 · 下载组件")
+        g.SetFont("s11", "Segoe UI")
+        g.Add("Text", "w400 Section", "首次运行需下载 WebView2")
+        clipBootStatusCtrl := g.Add("Text", "w400 h40 vBootStatus", msg)
+        clipBootPctCtrl := g.Add("Progress", "w400 h20 Range0-100", pct)
+        g.Add("Text", "w400 c666666", "下载完成后会自动重启；之后日常启动不再弹此窗。`n点右上角 × 可退出。")
+        g.OnEvent("Close", ClipBootOnClose)
+        g.Show("Center w440")
+        clipBootGui := g
+        try WinSetAlwaysOnTop(true, "ahk_id " g.Hwnd)
+        try WinActivate("ahk_id " g.Hwnd)
+    } else {
+        try clipBootStatusCtrl.Value := msg
+        try clipBootPctCtrl.Value := pct
+        try clipBootGui.Show("NA Center")
+    }
+    Sleep 40
+}
+
+ClipBootHide(*) {
+    global clipBootGui, clipBootStatusCtrl, clipBootPctCtrl, clipBootExitOnClose
+    global clipboardTrayVisible, clipboardStandalone, clipBootAllowUi
+    clipBootAllowUi := false
+    if !clipboardStandalone
+        return
+    if !clipboardTrayVisible {
+        ClipEnsureNoTrayExitWindow()
+        return
+    }
+    clipBootExitOnClose := false
+    if IsObject(clipBootGui) {
+        try clipBootGui.Destroy()
+    }
+    clipBootGui := 0
+    clipBootStatusCtrl := 0
+    clipBootPctCtrl := 0
+}
+
+ClipboardRelaunchSelf(*) {
+    global clipboardHosted
+    args := ""
+    for a in A_Args {
+        al := StrLower(String(a))
+        if al = "show" || al = "hosted"
+            continue
+        args .= (args = "" ? "" : " ") '"' String(a) '"'
+    }
+    if clipboardHosted
+        args := Trim(args " hosted")
+    cmd := Format('"{1}" "{2}"{3}', A_AhkPath, A_ScriptFullPath, args = "" ? "" : " " args)
+    Run(cmd)  ; 不要 Hide
+}
+
+ClipSetupStandaloneTray()
+
+; 有 lib\webview2 则静默继续；没有才弹下载窗 → 重启
+_wv2Ahk := A_ScriptDir "\lib\webview2\WebView2.ahk"
+_wv2Dll := A_ScriptDir "\lib\webview2\WebView2Loader.dll"
+_wv2NeedBoot := !FileExist(_wv2Ahk) || !FileExist(_wv2Dll) || !IsSet(WebView2)
+if _wv2NeedBoot {
+    clipBootAllowUi := true
+    ClipBootShow("缺少 WebView2，准备下载…", 6)
+    if !ClipboardBootstrapWebView2() {
+        ClipBootShow("WebView2 下载失败，请检查网络后重试", 0)
+        MsgBox "无法准备 WebView2 组件（lib\webview2）。`n请检查网络后重试。", "剪贴板", "Iconx"
+        ExitApp
+    }
+    ClipBootShow("组件就绪，正在重启…", 95)
+    Sleep 400
+    ClipboardRelaunchSelf()
+    ExitApp
+}
+
+ClipParentHotkey4Exists() {
+    parent := ""
+    SplitPath A_ScriptDir, , &parent
+    if parent = ""
+        return false
+    return !!FileExist(parent "\快捷键4.ahk")
+}
+
+ClipboardBootstrapWebView2() {
+    static ahkUrl := "https://raw.githubusercontent.com/thqby/ahk2_lib/master/WebView2/WebView2.ahk"
+    static nupkgUrl := "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.2903.40/microsoft.web.webview2.1.0.2903.40.nupkg"
+    dir := A_ScriptDir "\lib\webview2"
+    ahk := dir "\WebView2.ahk"
+    dll := dir "\WebView2Loader.dll"
+    try DirCreate(dir)
+    for p in [
+        A_ScriptDir "\lib\webview2_bak\WebView2.ahk",
+        A_ScriptDir "\lib\WebView2.ahk",
+        A_Temp "\WebView2.ahk"
+    ] {
+        if !FileExist(ahk) && FileExist(p) {
+            ClipBootShow("复制 WebView2.ahk…", 10)
+            try FileCopy(p, ahk, 1)
+        }
+    }
+    for p in [
+        A_ScriptDir "\lib\webview2_bak\WebView2Loader.dll",
+        A_ScriptDir "\lib\WebView2Loader.dll",
+        A_Temp "\WebView2Loader.dll"
+    ] {
+        if !FileExist(dll) && FileExist(p) {
+            ClipBootShow("复制 WebView2Loader.dll…", 12)
+            try FileCopy(p, dll, 1)
+        }
+    }
+    needAhk := !FileExist(ahk)
+    needDll := !FileExist(dll)
+    if !needAhk && !needDll
+        return true
+    ok := true
+    if needAhk {
+        ClipBootShow("正在下载 WebView2.ahk…", 18)
+        if !ClipboardDownloadFile(ahkUrl, ahk)
+            ok := false
+        else
+            ClipBootShow("WebView2.ahk 下载完成", 35)
+    }
+    if needDll {
+        ClipBootShow("正在下载 WebView2Loader.dll（NuGet）…", 45)
+        if !ClipboardDownloadWebView2Dll(nupkgUrl, dll)
+            ok := false
+        else
+            ClipBootShow("WebView2Loader.dll 就绪", 70)
+    }
+    return ok && FileExist(ahk) && FileExist(dll)
+}
+
+ClipJoinArgs(args) {
+    out := ""
+    for a in args
+        out .= (out = "" ? "" : " ") '"' String(a) '"'
+    return out
+}
+
+ClipboardDownloadFile(url, dest) {
+    try {
+        SplitPath dest, , &destDir
+        if destDir != ""
+            DirCreate destDir
+        tmp := dest ".part"
+        try FileDelete tmp
+        curl := A_WinDir "\System32\curl.exe"
+        if FileExist(curl) {
+            ClipBootShow("下载中（curl）…", 22)
+            rc := RunWait(Format('"{1}" -L --retry 3 --connect-timeout 20 -o "{2}" "{3}"', curl, tmp, url), , "Hide")
+            if rc = 0 && FileExist(tmp) && FileGetSize(tmp) > 1000 {
+                try FileMove tmp, dest, 1
+                return FileExist(dest) && FileGetSize(dest) > 1000
+            }
+        }
+        ClipBootShow("下载中（WinHttp）…", 25)
+        whr := ComObject("WinHttp.WinHttpRequest.5.1")
+        whr.Open("GET", url, false)
+        whr.SetTimeouts(10000, 10000, 30000, 120000)
+        whr.Send()
+        if whr.Status != 200
+            return false
+        stream := ComObject("ADODB.Stream")
+        stream.Type := 1
+        stream.Open()
+        stream.Write(whr.ResponseBody)
+        stream.SaveToFile(tmp, 2)
+        stream.Close()
+        try FileMove tmp, dest, 1
+        return FileExist(dest) && FileGetSize(dest) > 1000
+    } catch {
+        return false
+    }
+}
+
+ClipboardDownloadWebView2Dll(nupkgUrl, destDll) {
+    nupkg := A_Temp "\wv2_" A_TickCount ".nupkg"
+    unzipDir := A_Temp "\wv2_extract_" A_TickCount
+    try {
+        ClipBootShow("下载 WebView2 NuGet 包…", 48)
+        if !ClipboardDownloadFile(nupkgUrl, nupkg)
+            return false
+        ClipBootShow("解压 WebView2Loader.dll…", 60)
+        try DirDelete unzipDir, 1
+        DirCreate unzipDir
+        zipPath := unzipDir "\pkg.zip"
+        FileCopy nupkg, zipPath, 1
+        shell := ComObject("Shell.Application")
+        zipNs := shell.NameSpace(zipPath)
+        destNs := shell.NameSpace(unzipDir)
+        if !IsObject(zipNs) || !IsObject(destNs)
+            return false
+        destNs.CopyHere(zipNs.Items(), 4 | 16 | 1024)
+        loop 80 {
+            Sleep 100
+            if FileExist(unzipDir "\runtimes\win-x64\native\WebView2Loader.dll")
+                break
+            if Mod(A_Index, 10) = 0
+                ClipBootShow("解压中… " A_Index, 60 + Min(10, A_Index // 8))
+        }
+        src := ""
+        prefer := (A_PtrSize = 8) ? "win-x64" : "win-x86"
+        for arch in [prefer, "win-x64", "win-x86"] {
+            cand := unzipDir "\runtimes\" arch "\native\WebView2Loader.dll"
+            if FileExist(cand) {
+                src := cand
+                break
+            }
+        }
+        if src = "" {
+            loop files unzipDir "\WebView2Loader.dll", "FR" {
+                src := A_LoopFileFullPath
+                break
+            }
+        }
+        if src = ""
+            return false
+        SplitPath destDll, , &d
+        DirCreate d
+        FileCopy src, destDll, 1
+        return FileExist(destDll) && FileGetSize(destDll) > 1000
+    } catch {
+        return false
+    } finally {
+        try FileDelete nupkg
+        try DirDelete unzipDir, 1
+    }
+}
 
 ; skipGui：浏览器/微信等自定义光标时，勿先信 GetGUIThreadInfo 假光标（否则 UIA/MSAA 到不了）
 GetCaretPosEx(&left?, &top?, &right?, &bottom?, useHook := false, skipHeavy := false, skipGui := false) {
@@ -401,7 +703,7 @@ VIEW_PAGE_SIZE := 40
 FIRST_PAINT_SIZE := 20
 ; Clipboard screenshots (type=image) retention; file-copy thumbs (type=file / fimg_*) are permanent
 MAX_SCREENSHOTS := 100
-; Data root: prefer HELPME_HOME (synced runtime); else script-local ahk\clip_v1
+; Data root: prefer HELPME_HOME (synced runtime); else script-local data\clip_v1
 CLIP_V1_DIR  := ResolveClipV1Dir()
 HTML_FILE    := CLIP_V1_DIR "\index.html"
 SAVE_FILE    := CLIP_V1_DIR "\clips.json"          ; legacy (migrated once)
@@ -422,19 +724,72 @@ QUEUE_META_FILE  := CLIP_V1_DIR "\queue_meta.tsv"   ; uid -> group/index (sync, 
 RECENT_FOLDERS_FILE := CLIP_V1_DIR "\recent_folders.json"
 MAX_RECENT_FOLDERS := 20
 
-; HELPME_HOME set →%HELPME_HOME%\command_ext\ahk_ext\ahk\clip_v1
-; otherwise →%A_ScriptDir%\ahk\clip_v1
-ResolveClipV1Dir() {
+; HELPME_HOME set →%HELPME_HOME%\command_ext\ahk_ext\data\clip_v1
+; otherwise →%A_ScriptDir%\data\clip_v1
+; 兼容旧路径 ahk\clip_v1：新目录空时一次性迁入
+ResolveAhkExtDataRoot() {
     home := ""
     try home := EnvGet("HELPME_HOME")
     home := Trim(String(home))
     if home != "" {
         home := RTrim(home, "\/")
-        dir := home "\command_ext\ahk_ext\ahk\clip_v1"
+        dir := home "\command_ext\ahk_ext\data"
         try DirCreate dir
         return dir
     }
-    return A_ScriptDir "\ahk\clip_v1"
+    dir := A_ScriptDir "\data"
+    try DirCreate dir
+    return dir
+}
+
+ResolveClipV1Dir() {
+    root := ResolveAhkExtDataRoot()
+    dir := root "\clip_v1"
+    try DirCreate dir
+    legacy := ""
+    home := ""
+    try home := EnvGet("HELPME_HOME")
+    home := Trim(String(home))
+    if home != ""
+        legacy := RTrim(home, "\/") "\command_ext\ahk_ext\ahk\clip_v1"
+    else
+        legacy := A_ScriptDir "\ahk\clip_v1"
+    MigrateLegacyDataDir(legacy, dir)
+    return dir
+}
+
+; 目标为空且旧目录有内容时，整体迁入（避免 HELPME 上旧数据丢失）
+MigrateLegacyDataDir(legacy, preferred) {
+    if legacy = "" || legacy = preferred || !DirExist(legacy)
+        return
+    if FileExist(preferred "\index.html")
+        return
+    hasLegacy := FileExist(legacy "\index.html")
+    if !hasLegacy {
+        try {
+            loop files legacy "\*.*", "F" {
+                hasLegacy := true
+                break
+            }
+        }
+    }
+    if !hasLegacy
+        return
+    empty := true
+    try {
+        loop files preferred "\*.*", "FDR" {
+            empty := false
+            break
+        }
+    }
+    if !empty
+        return
+    try DirMove(legacy, preferred, "R")
+    catch {
+        try {
+            DirCopy(legacy, preferred, 1)
+        }
+    }
 }
 
 ; ── Crash diagnostics: last line in debug.log  ≈ where it died ──
@@ -4171,14 +4526,17 @@ global tabTotals := Map()           ; ViewCacheKey -> known total (skip full res
 global pruneScreenshotsArmed := false
 global pruneScreenshotsPending := false
 
-TraySetIcon("shell32.dll", 261)
-A_TrayMenu.Delete()
-A_TrayMenu.Add("显示剪贴板", (*) => ShowPanel())
-A_TrayMenu.Add("清空历史",   (*) => ClearAll())
-A_TrayMenu.Add()
-A_TrayMenu.Add("退出",       (*) => ExitApp())
-A_TrayMenu.Default := "显示剪贴板"
-A_IconTip := "ClipboardManager  (Win+V)"
+; 挂在快捷键4下：保持无托盘。独立运行时已在顶部 ClipSetupStandaloneTray 显示托盘。
+if !clipboardStandalone {
+    TraySetIcon("shell32.dll", 261)
+    A_TrayMenu.Delete()
+    A_TrayMenu.Add("显示剪贴板", (*) => ShowPanel())
+    A_TrayMenu.Add("清空历史",   (*) => ClearAll())
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("退出",       (*) => ExitApp())
+    A_TrayMenu.Default := "显示剪贴板"
+    A_IconTip := "ClipboardManager  (Win+V)"
+}
 
 ; Hotkeys are registered at the end of auto-execute (after EnsureDataDir / BuildGui)
 ; so a failed early init cannot leave the script without any show shortcut.
@@ -4473,7 +4831,7 @@ TextLooksLikeMarkdown(txt) {
 }
 
 AddClipItem(item) {
-    global clips, wvCore, STORE_DIR, lastTxt
+    global clips, wvCore, STORE_DIR, lastTxt, pasteQueueMode, pasteQueueIds, queueCaptureArmed
     ClipLog("AddClipItem begin type=" item.type)
     if !item.HasProp("uid") || !item.uid
         item.uid := NextClipUid()
@@ -4484,12 +4842,22 @@ AddClipItem(item) {
         ; NEVER FileCopy/GDI+ here —thumbs are lazy via EnsureFileClipThumb (async)
         ClipLog("AddClipItem file skip eager thumb (async EnsureFileClipThumb)")
     }
+    ; 相同内容已在粘贴队列中：不要 MemoryTake+前置。否则会把队列中间项抽到最前，撕裂 FIFO 连线。
+    if ClipContentAlreadyInPasteQueue(item) {
+        ClipLog("AddClipItem skip front — equal content already in paste queue type=" item.type)
+        if item.type = "text"
+            lastTxt := item.data
+        if queueCaptureArmed {
+            queueCaptureArmed := false
+            ShowQueueTip("已在队列", "", 700)
+        }
+        return
+    }
     ; Memory-first: update UI caches immediately, persist disk async
     ; Re-copy must inherit 收藏/标题 — otherwise DiskRemove*Equal deletes the pinned row
     ; and inserts a fresh unpinned clone (favorites appear "lost").
     ; EXCEPTION: queue capture needs a DISTINCT uid per FIFO slot. Collapsing onto an older
     ; equal-text row (MemoryTake + Inherit uid) is what turned 3 queue items into 2.
-    global queueCaptureArmed
     if item.type = "text" {
         if !queueCaptureArmed {
             old := MemoryTakeTextEqual(item.data)
@@ -5694,6 +6062,14 @@ IsWindowOwnedByPanel(hwnd) {
     return false
 }
 
+; 独立运行：关窗口 = 退出进程；挂在快捷键4下：只隐藏面板
+OnClipboardPanelClose(*) {
+    global clipboardStandalone, clipboardTrayVisible
+    if clipboardStandalone
+        ExitApp
+    HidePanel()
+}
+
 BuildGui() {
     global guiWin, wv, wvCore, HTML_FILE, CLIP_V1_DIR, STORE_DIR, STORE_HOST, panelVisible, wvBuilding
     PerfMark("BuildGui ENTER")
@@ -5708,7 +6084,7 @@ BuildGui() {
     guiWin.BackColor := "e4e7ee"   ; 与 UI 底色一致，避免外缘露灰边 #a6a49b
     guiWin.MarginX := 0
     guiWin.MarginY := 0
-    guiWin.OnEvent("Close", (*) => HidePanel())
+    guiWin.OnEvent("Close", OnClipboardPanelClose)
     guiWin.OnEvent("Size", OnGuiSize)
     ; WS_EX_NOACTIVATE: showing the panel must not steal keyboard focus
     try guiWin.Opt("+E0x08000000")
@@ -5719,9 +6095,11 @@ BuildGui() {
     PerfMark("BuildGui before WebView2.create")
 
     try {
-        dll := A_Temp "\WebView2Loader.dll"
+        dll := A_ScriptDir "\lib\webview2\WebView2Loader.dll"
         if !FileExist(dll)
-            throw Error("找不到 WebView2Loader.dll:`n" dll)
+            dll := A_Temp "\WebView2Loader.dll"  ; 兼容旧路径
+        if !FileExist(dll)
+            throw Error("找不到 WebView2Loader.dll:`n" A_ScriptDir "\lib\webview2\WebView2Loader.dll")
 
         dataDir := CLIP_V1_DIR "\wv2data"
         opts := {
@@ -9096,7 +9474,7 @@ B64DecodeToFile(b64, path) {
 }
 
 ; 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-; NDJSON page store (inlined —was ahk\clip_v1\ndjson_pages.ahk)
+; NDJSON page store (inlined —was data\clip_v1\ndjson_pages.ahk)
 ; each shard holds at most PAGE_SIZE records (newest pages first)
 ; 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 ; NDJSON page store: each shard file holds at most PAGE_SIZE records (newest pages first).
@@ -12761,6 +13139,15 @@ QueueCopyCatchup(gen) {
     }
     if txt = ""
         return
+    ; 已在队列中的相同文本：不再强制前置/再入队，避免撕裂 FIFO
+    probe := { type: "text", data: txt }
+    if ClipContentAlreadyInPasteQueue(probe) {
+        queueCaptureArmed := false
+        lastTxt := txt
+        ClipLog("PasteQueue catchup skip — already in queue len=" StrLen(txt))
+        ShowQueueTip("已在队列", "", 700)
+        return
+    }
     ClipLog("PasteQueue catchup force-add len=" StrLen(txt))
     ; Allow duplicate of lastTxt — this path exists specifically for unchanged clipboard
     item := {
@@ -12785,6 +13172,25 @@ QueueCopyCatchup(gen) {
     MemoryInsertFront(item)
     EnqueuePasteQueueItem(item)
     RequestUiPush()
+}
+
+; 当前 FIFO 队列里是否已有与 item 内容相同的条目（用于禁止再前置撕裂队列）
+ClipContentAlreadyInPasteQueue(item) {
+    global pasteQueueMode, pasteQueueIds
+    if !IsObject(item) || !pasteQueueMode || !IsObject(pasteQueueIds) || !pasteQueueIds.Length
+        return false
+    typ := item.HasProp("type") ? item.type : ""
+    data := item.HasProp("data") ? item.data : ""
+    if typ = "" || data = ""
+        return false
+    for id in pasteQueueIds {
+        c := ResolveClip(Integer(id))
+        if !IsObject(c)
+            continue
+        if c.type = typ && c.HasProp("data") && c.data = data
+            return true
+    }
+    return false
 }
 
 EnqueuePasteQueueItem(item) {
@@ -13202,7 +13608,7 @@ ClipLog("=== SCRIPT BOOT auto-execute END —waiting for clipReady ===")
 SetTimer(WarmWebViewEarly, -1)
 
 ; =================================================
-;  Init: create ahk\clip_v1 dirs and write HTML
+;  Init: create data\clip_v1 dirs and write HTML
 ; =================================================
 EnsureDataDir() {
     global CLIP_V1_DIR, HTML_FILE, STORE_DIR, PAGES_DIR, PAYLOAD_DIR
@@ -13267,7 +13673,7 @@ WriteHtmlFile() {
 }
 
 ; =================================================
-;  Ctrl+V: save clipboard image(s) into the active folder (not ahk\clip_v1)
+;  Ctrl+V: save clipboard image(s) into the active folder (not data\clip_v1)
 ; =================================================
 ; =================================================
 ;  Recent Explorer folders (double-click into dir -> "最近" tab)

@@ -2,7 +2,7 @@
 // @name         Infi Menu & Merchant Locations SVG Tree (V11.2 Item节点显示Menu功能)
 // @namespace    http://tampermonkey.net/
 // @version      11.3
-// @description  Ctrl+点击节点复制时带入队标记（clipboard_v1 识别）；普通点击/Ctrl+C 不影响队列。
+// @description  Ctrl+点击节点复制时带入队标记（clipboard.ahk 识别）；普通点击/Ctrl+C 不影响队列。
 // @author       You
 // @match        *://*.orderwithinfi.com/*
 // @require      https://d3js.org/d3.v7.min.js
