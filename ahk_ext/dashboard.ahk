@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 #NoTrayIcon
 ; 独立启动：缺 WebView2 时下载后重启；配置/下载/索引进度一律走圆圈 boot 页（不另开启动窗）
@@ -467,6 +467,8 @@ if showWhenReady
 SetTimer(StartEverythingBootOnce, -1)
 ; 后台写出 HTML（已存在则秒过）；WebView Navigate 前 FinishWebViewInit 还会再确保一次
 SetTimer(EnsureEmbeddedHtmlSafe, -1)
+; emoji.txt ↔ 脚本末尾 base64（异步，不挡主流程）
+SetTimer(SyncEmojiConfigPortable, -1)
 
 OnExternalShowMsg(*) {
     SetTimer(ShowWindow, -1)
@@ -634,45 +636,45 @@ FinishWebViewInit(controller) {
             bootShownAt := A_TickCount - 2000
             RevealBootWindow()
             try EnsureEmbeddedHtml()
-            if !FileExist(HTML_FILE)
-                throw Error("找不到界面:`n" HTML_FILE)
+        if !FileExist(HTML_FILE)
+            throw Error("找不到界面:`n" HTML_FILE)
 
-            mapRoot := GetShortPath(SEARCH_DIR)
-            try wvCore.SetVirtualHostNameToFolderMapping(APP_HOST, mapRoot, 1)
-            try {
-                loop parse "CDEFGHIJKLMNOPQRSTUVWXYZ" {
-                    root := A_LoopField ":\"
-                    if DirExist(root) {
-                        sp := GetShortPath(root)
-                        if sp != ""
-                            try wvCore.SetVirtualHostNameToFolderMapping(
-                                StrLower(A_LoopField) ".disk.local", sp, 1)
-                    }
+        mapRoot := GetShortPath(SEARCH_DIR)
+        try wvCore.SetVirtualHostNameToFolderMapping(APP_HOST, mapRoot, 1)
+        try {
+            loop parse "CDEFGHIJKLMNOPQRSTUVWXYZ" {
+                root := A_LoopField ":\"
+                if DirExist(root) {
+                    sp := GetShortPath(root)
+                    if sp != ""
+                        try wvCore.SetVirtualHostNameToFolderMapping(
+                            StrLower(A_LoopField) ".disk.local", sp, 1)
                 }
             }
+        }
 
-            global searchHost, webMsgSub, queuePollOn
-            searchHost := SearchBridge()
-            try wvCore.AddHostObjectToScript("ahk", searchHost)
-            try webMsgSub := wvCore.add_WebMessageReceived(HandleUiMessage)
-            catch as e {
-                AppLog("add_WebMessageReceived fail " e.Message)
-            }
+        global searchHost, webMsgSub, queuePollOn
+        searchHost := SearchBridge()
+        try wvCore.AddHostObjectToScript("ahk", searchHost)
+        try webMsgSub := wvCore.add_WebMessageReceived(HandleUiMessage)
+        catch as e {
+            AppLog("add_WebMessageReceived fail " e.Message)
+        }
             AppLog("Host+WebMsg ready (skip-boot) token=" webMsgSub)
 
             pageNavIssued := true
             wvCore.Navigate("https://" APP_HOST "/index.html?v=" A_Now "&bp=100&skipBoot=1")
-            wvBuilding := false
+        wvBuilding := false
             AppLog("Navigate issued skip-boot mode=" ReadLastUiMode())
             SetTimer(WatchUiReady, 400)
-            if !queuePollOn {
-                queuePollOn := true
-                SetTimer(DrainAhkQueue, 60)
-            }
-            SetTimer(WarmCommonIcons, -300)
+        if !queuePollOn {
+            queuePollOn := true
+            SetTimer(DrainAhkQueue, 60)
+        }
+        SetTimer(WarmCommonIcons, -300)
             global guiWin
             if IsObject(guiWin)
-                SetTimer(() => SetWindowAppIcon(guiWin.Hwnd), -50)
+            SetTimer(() => SetWindowAppIcon(guiWin.Hwnd), -50)
             return
         }
 
@@ -1015,8 +1017,8 @@ ExitDashboard(*) {
     StopProcMonitor()
     HideLoadSplash()
     try {
-        if IsObject(guiWin)
-            guiWin.Hide()
+    if IsObject(guiWin)
+        guiWin.Hide()
     }
     SetTimer(ExitDashboardFinish, -10)
 }
@@ -1138,9 +1140,9 @@ EnsureEmbeddedHtml() {
                 if ship != HTML_FILE
                     FileCopy(ship, HTML_FILE, 1)
                 AppLog("EnsureEmbeddedHtml ship sync " HTML_FILE)
-                return
-            }
+            return
         }
+    }
     }
     ; 已有且版本匹配才跳过；旧黄圈 / 旧闪屏逻辑要强制覆盖（HELPME 数据目录常残留旧文件）
     if FileExist(HTML_FILE) {
@@ -1222,6 +1224,160 @@ B64DecodeToFile(b64, path) {
     f.Close()
     return FileExist(path) && FileGetSize(path) > 0
 }
+
+; ── emoji.txt 便携同步（%HELPME_HOME%\command_ext\ahk\config\emoji.txt ↔ 脚本注释 base64）──
+EMOJI_CONFIG_TAG := "emoji.txt"
+global emojiEmbedArmed := false
+
+DefaultEmojiConfigText(*) {
+    return "############【常用】`r`n"
+        . "笑脸=😀`r`n"
+        . "赞=👍`r`n"
+        . "完成=✅`r`n"
+}
+
+B64EncodeFileBytes(path) {
+    if !FileExist(path)
+        return ""
+    try {
+        f := FileOpen(path, "r")
+        if !IsObject(f)
+            return ""
+        n := f.Length
+        if n < 1 {
+            f.Close()
+            return ""
+        }
+        buf := Buffer(n)
+        f.RawRead(buf)
+        f.Close()
+        while n > 0 && NumGet(buf, n - 1, "UChar") = 0
+            n -= 1
+        if n < 1
+            return ""
+        cch := 0
+        if !DllCall("crypt32\CryptBinaryToStringW", "Ptr", buf, "UInt", n, "UInt", 0x40000001, "Ptr", 0, "UInt*", &cch)
+            return ""
+        wbuf := Buffer(cch * 2, 0)
+        if !DllCall("crypt32\CryptBinaryToStringW", "Ptr", buf, "UInt", n, "UInt", 0x40000001, "Ptr", wbuf, "UInt*", &cch)
+            return ""
+        return RegExReplace(StrGet(wbuf, "UTF-16"), "[\r\n\s]+")
+    } catch {
+        return ""
+    }
+}
+
+PortableCommentMark(tag) {
+    return ";########################################################################################################### " String(tag)
+}
+
+FormatEmbeddedCommentB64(tag, b64) {
+    mark := PortableCommentMark(tag)
+    b64 := RegExReplace(String(b64), "\s+")
+    if b64 = "" || b64 = "xxxxx"
+        b64 := "xxxxx"
+    return mark "`n;" b64 "`n" mark
+}
+
+UpdateEmbeddedCommentB64(tag, newB64) {
+    path := A_ScriptFullPath
+    try content := FileRead(path, "UTF-8")
+    catch as e {
+        AppLog("UpdateEmbeddedCommentB64 read " e.Message)
+        return
+    }
+    mark := PortableCommentMark(tag)
+    replacement := FormatEmbeddedCommentB64(tag, newB64)
+    p1 := InStr(content, mark)
+    if !p1 {
+        if !RegExMatch(content, "`r?`n$")
+            content .= "`n"
+        content .= "`n" replacement "`n"
+    } else {
+        p2 := InStr(content, mark, false, p1 + StrLen(mark))
+        if !p2 {
+            end := p1 + StrLen(mark)
+            content := SubStr(content, 1, p1 - 1) . replacement . SubStr(content, end)
+        } else {
+            end := p2 + StrLen(mark)
+            content := SubStr(content, 1, p1 - 1) . replacement . SubStr(content, end)
+        }
+    }
+    try {
+        f := FileOpen(path, "w", "UTF-8")
+        f.Write(content)
+        f.Close()
+        AppLog("UpdateEmbeddedCommentB64 tag=" tag " b64Len=" StrLen(RegExReplace(String(newB64), "\s+")))
+    } catch as e {
+        AppLog("UpdateEmbeddedCommentB64 write " e.Message)
+    }
+}
+
+ScheduleEmojiConfigEmbed(*) {
+    global emojiEmbedArmed
+    if emojiEmbedArmed
+                return
+    emojiEmbedArmed := true
+    SetTimer(FlushEmojiConfigEmbed, -2000)
+}
+
+FlushEmojiConfigEmbed(*) {
+    global emojiEmbedArmed, EMOJI_CONFIG_TAG
+    emojiEmbedArmed := false
+    if !HasHelpmeHome()
+        return
+    path := AhkConfigPath("emoji")
+    if path = "" || !FileExist(path)
+        return
+    b64 := B64EncodeFileBytes(path)
+    if b64 = ""
+        return
+    cur := ReadEmbeddedCommentB64(EMOJI_CONFIG_TAG)
+    if b64 = cur
+        return
+    UpdateEmbeddedCommentB64(EMOJI_CONFIG_TAG, b64)
+}
+
+; 启动：缺文件→从脚本 base64 写出；有文件→异步回写脚本（不阻塞 UI）
+SyncEmojiConfigPortable(*) {
+    global EMOJI_CONFIG_TAG
+    try {
+        if !HasHelpmeHome() {
+            AppLog("SyncEmojiConfigPortable skip (no HELPME_HOME)")
+            return
+        }
+        dir := ResolveAhkConfigDir()
+        if dir = ""
+            return
+        DirCreate dir
+        path := AhkConfigPath("emoji")
+        if path = ""
+            return
+        if FileExist(path) {
+            ScheduleEmojiConfigEmbed()
+            AppLog("SyncEmojiConfigPortable file→embed scheduled")
+            return
+        }
+        curB64 := ReadEmbeddedCommentB64(EMOJI_CONFIG_TAG)
+        if curB64 != "" && curB64 != "xxxxx" {
+            ok := B64DecodeToFile(curB64, path)
+            AppLog("SyncEmojiConfigPortable decode→file ok=" (ok ? 1 : 0))
+            if ok
+                return
+        }
+        ; 无嵌入时写默认模板
+        f := FileOpen(path, "w", "UTF-8")
+        if IsObject(f) {
+            f.Write(DefaultEmojiConfigText())
+            f.Close()
+            ScheduleEmojiConfigEmbed()
+            AppLog("SyncEmojiConfigPortable wrote default emoji.txt")
+        }
+    } catch as e {
+        AppLog("SyncEmojiConfigPortable " e.Message)
+    }
+}
+
 ; 绿色仪表盘/表盘图标（托盘与窗口）
 AppDashIconB64() {
     return "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAASISURBVHhe7ZstUFtBEIAZXmgjkcjKysrKShwIcteqVCIRTO+lJnWVyEpkJBKZOiSykpkaZmoiqWtn7+5Bsrf7cj/7Qph538wOGXK/73b3du9ednZ6enp6enp6enp6umM6Hu5+UR+rWn0f1GruRC8Gtf63Ku67yugfg3p0unM+OsBNvRzORwcwiUGtr8KJxktV69uB0fWryae3uIvtxE5cXeKJyIia730dvcNdbgfTo32r4kY9hAMXl9lWmcee0Z9pm+5QjHqAB47HsnGqib4IBtcilVG/vLO7rIz+9ii2HTWvan2D67SLmoP24XF1z/Ro33tzYlBY7ITPXhv9BjdDMj3a91o1izEpeKgbdZIwEbeS4WAeBVR0oi8kVgce3qDW90Efq7Ko6pNDXFcet/J3xACWZRa92rG0OdmJ/wvffVHvcVU5puPhGrVfVEZ/wNUkAVWvzOg30Xcj9+IPv6HN4W3KDkHNB0b9xf2vjKXWN7BYuG4R3ikFnTnZjCf2kw9NgBR1ievnY6M7ep+Hld++yXuR8gctqr/ozN6WWDt5o/8E//N5BG4rHVh9pvOuHR6wdvKg6i7/IHemaqKOcZtJcNkcpKy4rDRRk2/KTtRx+H2hFoB64watGPXQdTKSMvmnOvo2LAcPITNAgjwcN2YbhAivQ3ImD3BawJVfCxn0wOpL77FL5E6+gQnRF7jcemzIGzQEHvcaF5WidPIAZJZhvQyHzQU+8H9cVgKJyQOw94d1M8yWO9aSdH5wvAUrY7M9gck3UJmjDdhSoOy/aEtZAlaJtlVVPHmAWbw0P8AEFjNcLhVORWlJnzzA+YEk502pZLIdYVw6TT3YJ2ly+8zJA5z/is9W+R2gxkVTiF39XaN+4ropWIdKtBu9E8CTwpVBSncAf1EStIsFVBjXTaF8/C79DRoAb42LpsCtTCijU1w3Bbez4DYTQ2Jc2TVQeA4PpkX4FizxtkoD95C4TZCkWyXaWeU7poZ1ZiCRZfpT5KDtpBiGvqBQc1wuB5tkkZqgLpO2KgZ3C43ahhwmBfIcQDARcqm2OrN7ttF1knqugVm8O1yuFS6YSHIkzwHrwBODOFgRohERG+0SzsfEb4FLMI4wTZU2DKTrwZit6WacXHOnwcUHjV3BHuBmOm82oLB3ATLOUBJ7m0yMNz+wmo6H3EFjaVQoDeezig9w+YNGfV/UsDDU+YXYQnGNd3IJmQHnq+wiSYyPVa8t2Ba5uN+JwOo38A5GuKMErJMmvX4XjrrVIQqcFiViV56ZPJz/lWaUJP6qjLwm93KVFXAk0mLzVjoN19vUznWub6OPnhKxJz1UpLcshcd2UXDxNhrItViGdz46cC9QE/2sSPl5RTQ+Pmgzh2ZQae8INiS/K1h2jpiF2x6phIkW8MzuVTddg5lYU3Graz+DZrk0nI47GFk8b26S9MaorGzqzbQonEnEa0OhLGzsIbrPC+HtNricFBF4/RZsfQNbbRnT8dA/iPBcMUNcAKbOtin5isf/Xsjf2EbsGo9y9fJ/N8Sx5PntbwXqk0P4/BwO7T+Qn6xZhSVK4QAAAABJRU5ErkJggg=="
@@ -2680,7 +2836,7 @@ RunSearchNow(q, cat, sort, seq, offset := 0, drive := "") {
             } else if items.Length >= limit {
                 total := -1
             }
-            try FileDelete cntFile
+                try FileDelete cntFile
         }
     } else {
         total := -1  ; UI keeps previous totalHits
@@ -5520,7 +5676,7 @@ SaveShellIconPng(path, isDir, forceExt, dest) {
     }
     if !hIcon && DllCall("shell32\SHGetFileInfoW", "WStr", query, "UInt", attrs
         , "Ptr", sfi, "UInt", sfi.Size, "UInt", flags, "Ptr")
-        hIcon := NumGet(sfi, 0, "Ptr")
+    hIcon := NumGet(sfi, 0, "Ptr")
     ; SHGetFileInfo 失败时：PrivateExtractIcons / ExtractIconEx 直接抽 exe 图标
     if !hIcon && path != "" && FileExist(path) && !isDir && forceExt = "" {
         hIcon := ExtractIconFromFile(path, 32)
@@ -5712,6 +5868,8 @@ NormalizeAhkConfigName(name) {
         return "getconfig"
     if n = "sys" || n = "sysconfig"
         return "sysconfig"
+    if n = "emoji" || n = "emoji_config" || n = "emojiconfig"
+        return "emoji"
     return ""
 }
 
@@ -6020,6 +6178,8 @@ SaveAhkConfigFile(name, b64) {
         ; 系统配置生效需重启脚本（箭头函数不能用 {} 多语句，会当成对象字面量）
         if n = "sysconfig"
             SetTimer(DashboardRelaunchAfterSysSave, -900)
+        else if n = "emoji"
+            ScheduleEmojiConfigEmbed()
     } catch as e {
         EmitAhkConfigResult(n, false, "保存失败: " e.Message)
     }
@@ -6162,16 +6322,16 @@ DispatchUiMsg(msg) {
             if !mainUiEntered
                 FinishEnterMainUi()
             else
-                SyncBootUi()
+        SyncBootUi()
             HideNativeBoot()
             HideLoadSplash()
             if dashboardStandalone && !mainUiEntered
                 SetTimer(ShowWindow, -1)
             SetTimer(StartEverythingBootOnce, -400)
-            SetTimer(PushCatIcons, -200)
-            SetTimer(PushCatIcons, -800)
-            SetTimer(PushDrives, -200)
-            SetTimer(PushDrives, -800)
+        SetTimer(PushCatIcons, -200)
+        SetTimer(PushCatIcons, -800)
+        SetTimer(PushDrives, -200)
+        SetTimer(PushDrives, -800)
             return
         }
         ; 第一次打开：不等 Everything，先揭主界面（绿圈只等 WebView ~1s）
@@ -9731,3 +9891,7 @@ class SearchBridge {
 ;aCgpOyB9IGNhdGNoIChfKSB7fSB9LCAyODApOwogIHNldFRpbWVvdXQoKCkgPT4geyB0cnkgeyB3aW5kb3cuX19yZXN5bmNTZWFyY2goKTsgfSBjYXRjaCAo
 ;Xykge30gfSwgOTAwKTsKfSkoKTsKPC9zY3JpcHQ+CjwvYm9keT4KPC9odG1sPgo=
 ;########################################################################################################### local_search_index.html
+
+;########################################################################################################### emoji.txt
+;IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMNCiMgYWhr55qE44CQ6KGo5oOF6YWN572u44CRDQojIGtleT3lhbPplK7lrZfvvIx2YWx1ZT3ooajmg4XmnKzouqvvvIjkvovlpoIg6J6D6J+5PfCfpoDvvIkNCiMg5YiG57uE55SoICMjIyMjIyMjIyMjI+OAkOe7hOWQjeOAke+8mycjJyDku6Pooajms6jph4oNCiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjDQoNCg0KIyMjIyMjIyMjIyMj44CQ8J+ko+W4uOeUqOOAkQ0K6Z2S6JuZPfCfkLgNCuibhz3wn5CNDQrniIbnrJHnrJHlvpflnKjlnLDmnb/kuIrmiZPmu5o98J+kow0K5ouJ54Ku5b2p5bim5by55oGt5Zac5aSn5Zac5LqL5bqG56Wd5oiQ5YqfPfCfjokNCueBq+eureS4gOmjnuWGsuWkqei1t+mjnua2qOWBnD3wn5qADQrpnLjnjovpvpk98J+mlg0K6Jyl6ISa57G75oGQ6b6ZPfCfppUNCuWcsOeQgz3wn4yPDQoNCiMjIyMjIyMjIyMjI+OAkPCfmIDooajmg4XjgJENCuagh+WHhueskeiEuOekvOiyjOW+rueskeihqOi+vuWPi+WlvT3wn5iADQrlpKfnrJHnnJ/or5rlvIDlv4Plv4Pmg4Xlpb098J+YhA0K6Zyy6b2/56yR6LCD55qu5b6X5oSP6Zyy6b2/5aSn56yRPfCfmIENCuecr+ecvOeskeWTiOWTiOWkp+eskeaegeW6puW8gOW/gz3wn5iGDQrmsZfpopznrJHlsLTlsKzlj4jkuI3lpLHnpLzosoznmoTlvq7nrJHomZrmg4rkuIDlnLo98J+YhQ0K56yR5ZOt5LqG56yR5Yiw6aOZ5rOq5p6B5YW25pCe56yRPfCfmIINCueIhueskeeskeW+l+WcqOWcsOadv+S4iuaJk+a7mj3wn6SjDQrluKbms6rlvq7nrJHnoLTpmLLkuoblvLrpopzmrKLnrJHoi6bkuK3kvZzkuZA98J+lsg0K5rip5ZKM5b6u56yR5a6z576e5rip5pqW5ZCr6JOEPeKYuu+4jw0K55Sc576O5b6u56yR5byA5b+D5ruh6Laz6KGo6L6+5ZaE5oSPPfCfmIoNCuWkqeS9v+eskeS5luW3p+WBh+ijheaXoOi+nOWBmuWWhOS6iz3wn5iHDQrlvq7nrJHnnYDnpLzosozmnInml7bluKbngrnpmLTpmLPmgKrmsJTmiJbml6DlpYg98J+Zgg0K5YCS6IS45peg5aWI6Zi06Ziz5oCq5rCU5Y+R55av5pGG54OCPfCfmYMNCuecqOecvOW8gOeOqeeskeW/g+eFp+S4jeWuo+aKm+WqmuecvD3wn5iJDQrph4rmgIDmnb7kuobkuIDlj6PmsJTlronlv4PlhoXlv4PlubPpnZk98J+YjA0K57qi5b+D55y86Iqx55e05p6B5bqm5Zac5qyi5b+D5YqoPfCfmI0NCua7oeiEuOeIseW/g+iiq+a4qeaaluWIsOayiea1uOWcqOeIseaEj+S4rT3wn6WwDQrlkLnniLHlv4PpgIHkuIrkurLkurLooajovr7llpzniLE98J+YmA0K5Lqy5Lqy5Zif5Zi05Lqy5Lqy57qv5rSB55qE54ixPfCfmJcNCuW+rueskeS6suS6suW8gOW/g+S4lOS6suaYtT3wn5iZDQrpl63nnLzkurLkurLmt7Hmg4XmiJbmuKnmn5TnmoTkurLkurI98J+Ymg0K5ZCQ6IiM5aS05aW95ZCD6aaL5LqG6LCD55quPfCfmIsNCuWQkOiIjOe6r+eyueaJk+i2o+aQnueskT3wn5ibDQrnnKjnnLzlkJDoiIzmjYnlvITkurrmu5HnqL3njqnpl7k98J+YnA0K55av54uC6IS4546p5Zeo5LqG5Y+R55av5pCe5oCqPfCfpKoNCuecr+ecvOWQkOiIjOW8gOeOqeeskeaBtuS9nOWJp+aIkOWKnz3wn5idDQrlj5HotKLnnLznnIvliLDpkrHkuobmg7PotZrpkrHotKLov7c98J+kkQ0K6L+95pif55y85bSH5ouc5oOK5Y+555y86YeM5pyJ5pif6L6w5aSn5rW3PfCfpKkNCuaItOa0vuWvueW4veW6huelnei/h+eUn+aXpeeLguasoj3wn6WzDQrmiZjoha7mgJ3ogIPorqnmiJHmg7Pmg7PmgIDnlpHnkKLno6g98J+klA0K5oyR55yJ6KGo56S65oCA55aR5LiN5L+h55yf5YGH55qEPfCfpKgNCuWNleeJh+ecvOmVnOS7lOe7hueglOeptuiAg+Wvn+WPkeeOsOeMq+iFuz3wn6eQDQrnnLzplZzlprnlk6XlrabpnLjmnoHlrqLoo4Xmh4I98J+kkw0K5oi05aKo6ZWc6KOF6YW35r2H5rSS56iz5LqGPfCfmI4NCuS8quijheijheaJruS5lOijheaJk+aJruaal+S4reinguWvnz3wn6W4DQrlnY/nrJHnnIvnoLTkuI3or7TnoLTli77lvJXlhoXmtrU98J+Yjw0K5LiN54i957+755m955y85auM5byD5LiN5byA5b+DPfCfmJINCue/u+eZveecvOaXoOivreaXoOiBiuaHkuW+l+eQhuS9oD3wn5mEDQrlkqzniZnlsLTlsKzmjY/kuIDmiormsZflpKfkuovkuI3lppk98J+YrA0K6ZW/6by75a2Q5Yy56K+65pu55pKS6LCO6K+05YGH6K+dPfCfpKUNCumdouaXoOihqOaDheWGt+a8oOaXoOivneWPr+ivtD3wn5iQDQrpl63nnLzml6Dor63lvbvlupXmsqHohL7msJTml6Dor63oh7PmnoE98J+YkQ0K5peg5Zi05L+d5oyB5rKJ6buY5peg5Y+v5aWJ5ZGKPfCfmLYNCuiZmue6v+iEuOmakOi6q+ayoeacieWtmOWcqOaEn+aDs+a2iOWksT3wn6ulDQrkupHpm77ohLjov7fojKvotbDnpZ7ohJHlrZDkuIDniYfnqbrnmb098J+YtuKAjfCfjKvvuI8NCuWPueawlOaXoOWliOe0r+S6huadvuS4gOWPo+awlD3wn5iu4oCN8J+SqA0K5ouJ6ZO+5Zi05L+d5a+G6Zet5Zi057ud5LiN6K+05ryP5Zi0PfCfpJANCuaxquaxquWkp+ecvOWPr+aAnOW3tOW3tOaxguaxguS9oOS6huaEn+WKqD3wn6W6DQrlkKvms6rmhJ/liqjokL3ms6rlvLrlv43ms6rmsLQ98J+luQ0K5bCP5byA5Zi05oSf5Yiw5oSP5aSW5ZCD5oOKPfCfmKYNCuaDiuaBkOS6i+aDheS4jeWvueWKsuaLheW/pz3wn5inDQrlhrfmsZflkJPlh7rkuIDouqvlhrfmsZc98J+TgQ0K54Sm6JmR5Ya35rGX5oWM5byg57Sn5byg5p6B5LqGPfCfmLANCuWkseacm+axl+iZmuaDiuS4gOWcuuS9huS7jeW+iOayruS4pz3wn5ilDQrmtYHms6rpmr7ov4flp5TlsYjlv4Pnoo498J+Yog0K5aSn5ZOt5ZOH5ZOH5aSn5ZOt5p6B5bqm5bSp5rqDPfCfmK0NCuWwluWPq+WQk+atu+S6uuS6humch+aDiuaegeS6hj3wn5ixDQrnl5voi6bnuqDnu5Ppmr7ku6Xlv43lj5c98J+Ylg0K5b+N6ICQ5ZKs54mZ5Z2a5oyB55eb6IumPfCfmKMNCuayruS4p+WeguWktOS4p+awlOWkseiQvT3wn5ieDQrlhrfmsZfmsZflt6XkvZzntK/kuobljovlipvlpKc98J+Ykw0K55ay5oOr57Sv5Z6u5LqG5b+r5pKR5LiN5L2P5LqGPfCfmKkNCuaKk+eLgueXm+iLpuWPq+WWiuWPl+Wkn+S6hj3wn5irDQrmiZPlk4jmrKDlm7Dkuobml6DogYrmg7PnnaHop4k98J+lsQ0K5ZO85rCU5YKy5aiH6IOc5Yip5LiN5pyN5rCUPfCfmKQNCueUn+awlOWPkeaAkuaEpOaAkj3wn5ihDQrpo5nohI/or53msJTliLDpqoLkurrmmrTmgJI98J+krA0K5aS06ISR54K46KOC6aKg6KaG6K6k55+l6KeC5piP5aSq6ZyH5pK85LqGPfCfpK8NCuiEuOe6ouWus+e+nuS4jeWlveaEj+aAneiiq+WQk+WIsD3wn5izDQrlj5Hng63lpKrng63kuobooqvluIXliLDnvo7liLDlj5Hng6s98J+ltQ0K5Y+R5Ya75Ya75YO15LqG5Ya36YW36KKr5ZCT5Ya3PfCfpbYNCuiejeWMlueDreeIhuS6huWwtOWwrOW+l+aDs+mSu+WcsOe8neaRhueDgj3wn6ugDQrmgbblv4Plj43og4Pmg7PlkJDohojlupQ98J+kog0K5ZGV5ZCQ5ZCQ5LqG5p6B5YW25Y+N5oSfPfCfpK4NCuaJk+WWt+Waj+aEn+WGkuS6hui/h+aVjz3wn6SnDQrph4/kvZPmuKnnlJ/nl4Xlj5Hng6flj5Hng6fkuK098J+kkg0K5YyF5omO5aS05Y+X5Lyk5LqG5oyo5omT5LqGPfCfpJUNCuWQrOS4jea4heayoeWQrOa4heS9oOivtOWVpT3wn6ePDQrnnaHop4nnnaHnnYDkuoblm7DlgKY98J+YtA0K5pmV5aS06L2s5ZCR5pmV5LqG5oe15ZyIPfCfmLUNCuieuuaXi+ecvOiiq+WCrOecoOS6huaegeW6pua3t+S5sT3wn5i14oCN8J+Sqw0K5bCP5LiR6Ieq5Ziy5bCP5LiR56uf5piv5oiR6Ieq5bexPfCfpKENCuiIrOiLpeaBtumtlOaXpeacrOaBtumtlOWHtueLoD3wn5G5DQrlpKnni5flgrLmhaLnlJ/msJQ98J+Rug0K5bm954G16ay86a2C5byA546p56yR6KOF6ay8PfCfkbsNCuWkluaYn+S6uuWlh+iRqeiEkeWbnui3r+a4heWlhz3wn5G9DQrmnLrlmajkurrmnLrmorDljJbmrbvmnb898J+klg0K5L6/5L6/5pCe56yR6L+Q5Yq/5bGO6L+QPfCfkqkNCg0KIyMjIyMjIyMjIyMj44CQ8J+RjeaJi+WKv+WSjOW6huelneOAkQ0K56uW5aSn5ouH5oyH54K56LWe6LWe5ZCM5rKh6Zeu6aKY5qOSPfCfkY0NCuaLh+aMh+WQkeS4i+W3ruivhOWPjeWvueS4jeihjOi4qT3wn5GODQrpvJPmjozllarllarllarpvJPmjoznpZ3otLrnsr7lvak98J+Rjw0K5Li+5Y+M5omL5qyi5ZG85bqG56Wd5aSq5qOS5LqG5LiH5bKBPfCfmYwNCuW8oOW8gOWPjOaJi+aLpeaKseWdpuivmuWxleekuj3wn5GQDQrlj4zmjozlkJHkuIrnpYjnpbfmjqXmlLbnpYjmsYI98J+ksg0K5o+h5omL5ZCI5L2c5oSJ5b+r5oiQ5Lqk5qyi6L+O6L6+5oiQ5YWx6K+GPfCfpJ0NCuWHuuaLs+WKoOayueaJk+awlOWKm+mHjz3wn5GKDQrmj6Hmi7PlnZrmjIHliqDmsrnlj43mipflm6Lnu5M94pyKDQrlt6blhrLmi7Plr7nmi7PmiZPmi5vlkbznorDmi7M98J+kmw0K5Y+z5Yay5ouz5a+55ouz5Zue5bqU57uE5ZCI5L2/55SoPfCfpJwNCuS6pOWPieaJi+aMh+eliOelt+Wlvei/kOiuuOaEv0ZpbmdlcnNjcm9zc2VkPfCfpJ4NCuWJquWIgOaJi+iDnOWIqeiAtuiDnOWIqeaLjeeFp+e7j+WFuOWnv+WKvz3inIzvuI8NCueIseS9oOeahOaJi+WKv+aRh+a7mklMb3ZlWW915aSn5ouH5oyH6aOf5oyH5bCP5ouH5oyH5byg5byAPfCfpJ8NCuaRh+a7muaJi+WKv+aci+WFi+mHkeWxnuWXqOi1t+adpeWPquW8oOW8gOmjn+aMh+WSjOWwj+aLh+aMhz3wn6SYDQrmjY/miYvmjIfmhI/lvI/miYvlir/ooajovr7kvaDmg7PmgI7moLfkvaDlnKjor7Tku4DkuYg98J+kjA0K5o2P5LiA54K554K55LiA54K554K55b6u5bCP5bCx5beu5LiA54K5PfCfpI8NCk9L5omL5Yq/5rKh6Zeu6aKY5Y+v5Lul6LWe5ZCMPfCfkYwNCuW8oOW8gOS6lOaMh+WBnOatojXlh7vmjow98J+WkO+4jw0K5Li+5omL5Y+R6KiA5o+Q6Zeu5ouS57udPeKciw0K5omL6IOM5pyd5aSW5oyh5L2P5ouS57ud5YGc5LiLPfCfpJoNCuaMpeaJi+S9oOWlveWGjeingeaJk+aLm+WRvD3wn5GLDQrmiZPnlLXor502NjbogZTns7vmiJHphbc2NjblpI/lqIHlpLfpmL/nvZflk4jmiYvlir898J+kmQ0K5oyH5ZCR5Y+z5b6A5Y+z55yL5o6o6I2Q54K55Ye76L+Z6YeMPfCfkYkNCuaMh+WQkeW3puW+gOW3pueci+azqOaEj+i/mei+uT3wn5GIDQrmjIflkJHkvqfkuIrlvoDkuIrnnIvnnIvkuIrpnaI98J+Rhg0K5oyH5ZCR5LiL5b6A5LiL55yL55yL6K+E6K665Yy66ZmE5Zu+PfCfkYcNCuerlumjn+aMh+azqOaEj+esrDHnrYnkuIDkuIs94pid77iPDQrmjIfnnYDkvaDlsLHmmK/kvaDkvaDlvLrng4jnmoTlr7nosaHmhJ898J+rtQ0K5YaZ5a2X6K6w56yU6K6w5YaZ5L2c5Lia562+572yPeKcje+4jw0K6Ieq5ouN5ouN54Wn5Y+R5pyL5Y+L5ZyI6Ieq5ouNPfCfpLMNCuWQiOWNgeeliOelt+aLnOaJmOaEn+iwoueliOelt+W5s+WuieS5n+W4uOS9nOS4uuiwouiwouS9v+eUqD3wn5mPDQrpnqDouqzpgZPmrYnmhJ/osKLpnZ7luLjmirHmrYk98J+Zhw0K55S3PfCfmYfigI3imYLvuI8NCuWlsz3wn5mH4oCN4pmA77iPDQrogLjogqnkuI3nn6XpgZPml6DmiYDosJPpmo/kvr/lkKc98J+ktw0K55S3XzI98J+kt+KAjeKZgu+4jw0K5aWzXzI98J+kt+KAjeKZgO+4jw0K5o2C6IS45peg6K+t5rKh55y855yL5bSp5rqDPfCfpKYNCueUt18zPfCfpKbigI3imYLvuI8NCuWls18zPfCfpKbigI3imYDvuI8NCua0vuWvueiEuOi/h+eUn+aXpeeLguasouWXqOi1t+adpT3wn6WzDQrlvannkIPnoo7oirHnkIPlvIDkuJroioLluoblpKflkInlpKfliKk98J+Oig0K5rCU55CD55Sf5pel5rS+5a+55rS75Yqo6KOF5omuPfCfjogNCueUn+aXpeibi+ezlei/h+eUn+aXpeiuuOaEv0hhcHB5QmlydGhkYXk98J+Ogg0K5YiH5Z2X6JuL57OV5ZCD55Sc5ZOB5bqG56Wd5bCP56Gu5bm4PfCfjbANCummmeann+W8gOmmmeann+W6huelneiDnOWIqemrmOe6p+a0vuWvuT3wn42+DQrnuqLphZLnorDmna/kvJjpm4XnuqbkvJrlvq7phro98J+Ntw0K6bih5bC+6YWS6YWS5ZCn5aSc55Sf5rS75pS+5p2+PfCfjbgNCuWVpOmFkuW5suadr+iBmumkkOWknOW4gueDp+eDpD3wn426DQrmi4nngq7lvanluKblvLnmga3llpzlpKfllpzkuovluobnpZ3miJDlip898J+OiQ0K56Kw5p2v5bmy5p2v56Wd6LS65pyL5Y+L6IGa5LyaPfCfjbsNCueDn+iKseaWsOW5tOi3qOW5tOWkp+Wei+ebm+WFuD3wn46GDQrnur/pppnoirHngavmiYvmjIHng5/oirHmtarmvKvlpI/lpJzluoblhbg98J+Ohw0K57qi5YyF6L+H5bm05Y+R57qi5YyF5oGt5Zac5Y+R6LSiPfCfp6cNCue6oueBr+esvOWFg+WuteiKguS4reeni+iKguS4reWbvemjjj3wn4+uDQrlnKPor57moJHlnKPor57oioLlhqzml6Xni4LmrKI98J+OhA0K5LiH5Zyj6IqC5Y2X55Oc5LiH5Zyj6IqC5pCe5oCq5LiN57uZ57OW5bCx5o2j5LmxPfCfjoMNCum7hOS4neW4pueliOemj+aAgOW/teaUr+aMgT3wn46X77iPDQrwn46f77iPPfCfjp/vuI8NCumXqOelqOW9qeelqOeci+a8lOWUseS8muS4reWllueci+eUteW9sT3wn46rDQoNCiMjIyMjIyMjIyMjI+OAkPCfkIjliqjnianjgJENCuieg+ifuT3wn6aADQrpvpnomb498J+mng0K6bKc6Jm+PfCfppANCuS5jOi0vOmxv+mxvD3wn6aRDQrnq6Dpsbw98J+QmQ0K6bG8PfCfkJ8NCueDreW4pumxvD3wn5CgDQrliLrosZo98J+QoQ0K6bKo6bG8PfCfpogNCua1t+ixmj3wn5CsDQrllrfmsLTpsrjpsbw98J+Qsw0K6bK46bG8PfCfkIsNCua1t+ixuT3wn6atDQrni5flpLQ98J+Qtg0K54uXPfCfkJUNCueMq+WktD3wn5CxDQrnjKs98J+QiA0K6byg5aS0PfCfkK0NCum8oD3wn5CBDQrku5PpvKA98J+QuQ0K5YWU5aS0PfCfkLANCuWFlOWtkD3wn5CHDQrni5Dni7g98J+mig0K54aKPfCfkLsNCueGiueMqz3wn5C8DQrogIPmi4k98J+QqA0K6JmO5aS0PfCfkK8NCuiAgeiZjj3wn5CFDQrni67lrZA98J+mgQ0K54mb5aS0PfCfkK4NCuWltueJmz3wn5CEDQrnjKrlpLQ98J+Qtw0K54yqPfCfkJYNCueMtOWktD3wn5C1DQrnjLTlrZA98J+Qkg0K6ams5aS0PfCfkLQNCuWMuemprD3wn5CODQrlpKfosaE98J+QmA0K54qA54mbPfCfpo8NCuays+mprD3wn6abDQrplb/poojpub/ni7w98J+mkg0K8J+Quj3wn5C6DQrmtaPnhoo98J+mnQ0K6Iet6bysPfCfpqgNCuagkeaHkj3wn6alDQrmsLTnja098J+mpg0K6KKL6bygPfCfppgNCum4oeWktD3wn5CUDQrlhazpuKE98J+Qkw0K5a215bCP6bihPfCfkKUNCuWwj+m4oT3wn5CkDQrpuK3lrZA98J+mhg0K6bmwPfCfpoUNCum4rueMq+WktOm5sD3wn6aJDQrpuabpuYk98J+mnA0K54Gr54OI6bifPfCfpqkNCuS8gem5hT3wn5CnDQrpuL3lrZA98J+Viu+4jw0K6Jyc6JyCPfCfkJ0NCuavm+avm+iZqz3wn5CbDQronbTonbY98J+miw0K6JyX54mbPfCfkIwNCueTouiZqz3wn5CeDQromoLomoE98J+QnA0K6JyY6JubPfCflbfvuI8NCuS5jOm+nz3wn5CiDQrom4c98J+QjQ0K6Jyl6Jy0PfCfpo4NCumzhOmxvD3wn5CKDQrpnZLom5k98J+QuA0K5aSn54yp54ypPfCfpo0NCue6ouavm+eMqeeMqT3wn6anDQrlr7znm7Lniqw98J+mrg0K5pyN5Yqh54qsPfCfproNCui0teWuvueKrD3wn5CpDQrpu5HnjKs94qybDQrosbnlrZA98J+Qhg0K54us6KeS5YW9PfCfpoQNCuaWkemprD3wn6aTDQrpub898J+mjA0K6YeO54mbPfCfpqwNCuWFrOeJmz3wn5CCDQrmsLTniZs98J+Qgw0K6YeO54yqPfCfkJcNCueMqum8u+WtkD3wn5C9DQrlhaznvoo98J+Qjw0K57u1576KPfCfkJENCuWxsee+ij3wn5CQDQrljZXls7Dpqobpqbw98J+Qqg0K5Y+M5bOw6aqG6am8PfCfkKsNCue+jua0sumpvD3wn6aZDQrnjJvnirjosaE98J+mow0K6ICX5a2QPfCfkIANCuadvum8oD3wn5C/77iPDQrmtbfni7g98J+mqw0K5Yi654ysPfCfppQNCuidmeidoD3wn6aHDQrljJfmnoHnhoo98J+Qu+KAjeKdhO+4jw0K542+PfCfpqENCueIquWNsD3wn5C+DQrlsI/puKHnoLTlo7M98J+Qow0K6bifPfCfkKYNCuWkqem5hT3wn6aiDQrmuKHmuKHpuJ898J+mpA0K57695q+bPfCfqrYNCuWtlOmbgD3wn6aaDQrngavpuKE98J+mgw0K6bmFPfCfqr8NCue/heiGgD3wn6q9DQrpvpnlpLQ98J+Qsg0K6b6ZPfCfkIkNCuicpeiEmuexu+aBkOm+mT3wn6aVDQrpnLjnjovpvpk98J+mlg0K5rW36J66PfCfkJoNCuePiueRmj3wn6q4DQrniaHom4498J+mqg0K5rC05q+NPfCfqrwNCueUsuiZqz3wn6qyDQron4von4A98J+mlw0K6J+R6J6CPfCfqrMNCuicmOibm+e9kT3wn5W477iPDQronY7lrZA98J+mgg0K6JqK5a2QPfCfpp8NCuiLjeidhz3wn6qwDQrooJXomas98J+qsQ0KDQojIyMjIyMjIyMjIyPjgJDwn4y05qSN54mp44CRDQrlj5Hoir3mlrDoir3mlrDnlJ/liJrlvIDlp4vluIzmnJs98J+MsQ0K6I2v6I2J6I2J5pys5aSp54S25pyJ5py66I2J6I2v5riF5pawPfCfjL8NCuS4ieWPtuiNieW5uOi/kOeIseWwlOWFsOe7v+iJsj3imJjvuI8NCuWbm+WPtuiNieaegeW6puW5uOi/kOWlvei/kOi/nui/nj3wn42ADQrnm4bmoL3lrqTlhoXnu7/mpI3lsYXlrrblm63oibrlhbvoirE98J+qtA0K6ZqP6aOO6aOY6JC955qE5Y+25a2Q5b6u6aOO56eL5aSp6Ieq54S26L275p2+PfCfjYMNCuiQveWPtueni+WkqeWHi+mbtuaAgOaXp+aNouWtoz3wn42CDQrmnqvlj7bnp4vlpKnliqDmi7/lpKfnuqLlj7Y98J+NgQ0K5qix6Iqx5pil5aSp55qE5rWq5ryr5pel5pys5qix6Iqx5bCR5aWz5b+DPfCfjLgNCueZveiKseagh+iusOS8mOengOa6kOiHquaXpeacrOWtpuagoeeahOWllueroOiKseactT3wn5KuDQroirHppbDlpZbnq6Dli4vnq6DluobnpZ098J+Pte+4jw0K546r55Gw546r55Gw6Iqx54ix5oOF5rWq5ryr54Ot54OIPfCfjLkNCuaer+iQjueahOiKseW/g+eijue7neacm+mAneWOu+eahOeIsT3wn6WADQrmnLHmp7/mibbmoZHoirHng63luKbpo47mg4XlpI/ml6XluqblgYc98J+Mug0K5ZCR5pel6JG16Ziz5YWJ56ev5p6B5rip5pqW5biM5pybPfCfjLsNCumbj+W9ouWwj+eZveiKsee6r+a0geWPr+eIsea4heaWsD3wn4y8DQrpg4Hph5HpppnkvJjpm4XmmKXlpKnpq5jotLU98J+Mtw0K6Iqx5p2f6YCB6Iqx56Wd6LS65oSf6LCi57uT5amaPfCfkpANCuW4uOmdkuagkeadvuagkeajruael+Wkp+iHqueEtuWdmumfpz3wn4yyDQrokL3lj7bmoJHlpKfmoJHpga7ojavnjq/kv53moJHmnKg98J+Msw0K5qOV5qaI5qCR5qSw5a2Q5qCR5rW35rup54Ot5bim5bqm5YGH5aSP5aSpPfCfjLQNCuS7meS6uuaOjOaymea8oOWdmuW8uumYsui+kOWwhOiAkOaXsT3wn4y1DQrkuIPlpJXnq7norrjmhL/nq7nml6XmnKzkuIPlpJXoioLnpYjnpo898J+Oiw0K6Zeo5p2+5pel5pys5paw5bm06KOF5omu5ZCJ56Wl5aaC5oSPPfCfjo0NCueou+epl+m6puepl+S4sOaUtueyrumjn+S5oeadkeWGnOS4muiYkeiPhz3wn4y+DQrmr5LomJHoj4fotoXnuqfomJHoj4fph4fomJHoj4fmuLjmiI/pgZPlhbflj6/niLE98J+NhA0K54mb5rK55p6c6bOE5qKo5YGl5bq36aWu6aOf6L276aOf5rK56ISC5p6cPfCfpZENCuiMhOWtkOiMhOWtkOWcqOe9kee7nOivreWig+S4reW4uOS9nOS4uueJueWumuaal+ekuuespuWPtz3wn42GDQrlnJ/osYbpqazpk4Polq/kuLvpo5/nrKjmi5lQb3RhdG/olq/mnaHljp/mlpk98J+llA0K6IOh6JCd5Y2c5YWU5a2Q6aOf54mp6KGl5YWF57u055Sf57Sg5aWW5Yqx6IOh6JCd5Y2c5LiO5qOS5a2QPfCfpZUNCueOieexs+WGnOS9nOeJqeeIhuexs+iKseWOn+aWmeeyrumjnz3wn4y9DQrnuqLovqPmpJLovqPng63mg4XngavniIbngavovqM98J+Mtu+4jw0K6Z2S5qSS5b2p5qSS6JSs6I+c5oyR6aOf5b6I5aSa5bCP5a2p5LiN5ZCD6Z2S5qSSPfCfq5ENCum7hOeTnOaVt+mdouiGnOa4heeIvee+juWuueWHieaLjD3wn6WSDQrnu7/lj7boj5znlJ/oj5zolKzoj5zmspnmi4nlh4/ohILppJDmnInmnLo98J+lrA0K6KW/5YWw6Iqx5YGl5bq36aOf5ZOB5bCP5qCR6IuX6YCg5Z6L5YGl6Lqr6aSQPfCfpaYNCuWkp+iSnOiwg+WRs+WTgempsemCquiSnOmmmT3wn6eEDQrmtIvokbHliaXmtIvokbHlgqzms6rln7rlsYLosIPlkbM98J+nhQ0K6Iqx55Sf5Z2a5p6c6Iqx55Sf5rK56Iqx55Sf6YWx5omjMemAgeiKseeUnz3wn6WcDQrosYblrZDnuqLosYbosYbnsbvnm7jmgJ3osYbnuqLosYbmspnooaXlhYXom4vnmb098J+rmA0K5qCX5a2Q5p2/5qCX56eL5aSp57OW54KS5qCX5a2Q5Z2a5p6cPfCfjLANCueUn+WnnOWnnOmpseWvkuWnnOiMtuiwg+WRs+agueiMjj3wn6uaDQrosYzosYbojZrosYbop5LosYzosYbnu7/oibLolKzoj5w98J+rmw0K5qC56IyO6JSs6I+c55Sc6I+c5qC56Iqc6I+B6JCd5Y2c562J5Zyf6YeM6ZW/5Ye655qE5Z2X5qC5PfCfq5wNCuiRoeiQhOiRoeiQhOiRoeiQhOmFkuWQg+iRoeiQhOS4jeWQkOiRoeiQhOearj3wn42HDQrlk4jlr4bnk5zpppnnk5znlJznk5zmsLTmnpzmspnmi4k98J+NiA0K6KW/55Oc5aSP5aSp5ZCD55Oc576k5LyX5riF5YeJ6Kej5pqRPfCfjYkNCuapmOWtkOafkeapmOWkp+WQieWkp+WIqeafkeapmOihpeWFhee7tEM98J+Nig0K5p+g5qqs6YW45p+g5qqs57K+6YW45LqG576h5oWV5auJ5aaSPfCfjYsNCumdkuafoOmFuOapmem4oeWwvumFkumFjeaWmeS4nOWNl+S6mumjjuWRsz3wn42L4oCN8J+fqQ0K6aaZ6JWJ6aaZ6JWJ5ruR5YCS6KGl5YWF6ZK+5YWD57SgPfCfjYwNCuiPoOiQneWHpOaiqOeDreW4puawtOaenOiPoOiQneWMheWHpOaiqOmFpT3wn42NDQroipLmnpzoipLmnpzoipLmnpzlhrDng63luKbpo47lkbM98J+lrQ0K57qi6Iu55p6c5YGl5bq3QW5hcHBsZWFkYXnlubPlronlpJzoi7nmnpzlhazlj7g98J+Njg0K6Z2S6Iu55p6c6Z2S5rap6YW455Sc5pyq5oiQ54afPfCfjY8NCuaiqOaiqOemu+WIq+iwkOmfs+a2puiCuuahg+WtkD3wn42QDQrmoYPlrZDmsLTonJzmoYPmoYPmoYPoirHov5DlnKjnvZHnu5zor63looPkuK3kuZ/mjIfoh4Dpg6g98J+NkQ0K5qix5qGD5qix5qGD6L2m5Y6Y5a2Q6auY6aKc5YC8PfCfjZINCuiNieiOk+iNieiOk+WwkeWls+aEn+eUnOe+jj3wn42TDQrok53ojpPmiqTnnLzok53ojpPlubLotoXnuqfpo5/niak98J+rkA0K54yV54y05qGD5aWH5byC5p6c57u0Q+S5i+eOi+Wlh+W8guaenD3wn6WdDQrnlarojITopb/nuqLmn7/nlarojITngpLom4vml6LmmK/msLTmnpzkuZ/mmK/olKzoj5w98J+NhQ0K5qmE5qaE5qmE5qaE5p6d5ZKM5bmz5qmE5qaE5rK55Zyw5Lit5rW3PfCfq5INCuaksOWtkOeDreW4puaksOaxgea1t+a7qeW6puWBhz3wn6WlDQrmnKjlpLTmn7TngavmnKjmnZDmoJHlubLpnLLokKXng6fmn7Tmo5Xmpog98J+qtQ0K6bif5bei5bim6JuL5qSN54mp5p6d5p2h5pCt5bu655qE56qd562R5bei5a62PfCfqroNCuepuum4n+W3ouemu+W3ouetkeW3ouWHhuWkhz3wn6q5DQropJDoibLpo5/nlKjoj4zpppnoj4flj6PomJHmnKjogLPnsbvlubPoj4c98J+NhOKAjfCfn6sNCg0KIyMjIyMjIyMjIyMj44CQ8J+al+S6pOmAmuW3peWFt+OAkQ0K5bCP5rG96L2m6Ieq6am+5Ye66KGM5LiK54+tPfCfmpcNCvCfp4w98J+njA0K6LWb6L2m6LeR6L2m6aOZ6L2m6L+95rGC6YCf5bqmPfCfj47vuI8NCuiHquihjOi9pumqkeihjOS9jueis+eOr+S/neWBpei6qz3wn5qyDQrouI/mnb/mkanmiZjnlLXliqjovablpJbljZbpgJrli6Tmlrnkvr898J+btQ0K6aOe5py65Ye65beu5Ye65aKD5ri46LW36aOePeKciO+4jw0K54Gr566t5LiA6aOe5Yay5aSp6LW36aOe5rao5YGcPfCfmoANCuaIv+Wxi+WutuWbnuWutua4qemmqOaIv+WcsOS6pz3wn4+gDQrlip7lhazlpKfmpbzmiZPlt6Xlhazlj7jlhpnlrZfmpbw98J+Pog0K5Yy76Zmi55yL55eF5YGl5bq35L2T5qOAPfCfj6UNCuWtpuagoeS4iuWtpuW8gOWtpuagoeWbreeUn+a0uz3wn4+rDQrpk4HloZTlnLDmoIfml4XmuLjlt7Tpu47kuJzkuqzmiZPljaE98J+XvA0K5Ye656ef6L2mPfCfmpUNCuWFrOS6pOi9pj3wn5qMDQrlnLDpk4E98J+ahw0K6auY6ZOBPfCfmoQNCuebtOWNh+acuj3wn5qBDQrmkanmiZjovaY98J+Pje+4jw0K6L2u6Ii5PfCfmqINCuW4huiIuT3im7UNCuS+v+WIqeW6lz3wn4+qDQrphZLlupc98J+PqA0K6Ieq55Sx5aWz56We5YOPPfCfl70NCuaVmeWggj3im6oNCua4heecn+Wvuj3wn5WMDQrmtbfmu6k98J+Plu+4jw0K6Zuq5bGxPfCfj5TvuI8NCueBq+WxsT3wn4yLDQrpnLLokKU98J+Ple+4jw0KDQojIyMjIyMjIyMjIyPjgJDwn42U576O6aOf5LiO576O5aaG44CRDQrmsYnloKHlv6vppJDlnoPlnL7lv6vkuZDpo5/lk4Hnvo7lvI898J+NlA0K5oqr6JCo6IGa5Lya5oqr6JCo5b+r5LmQ5rqQ5rOJPfCfjZUNCuiWr+adoeiWr+adoei/veWJp+mbtumjnz3wn42fDQrng63ni5flv6vppJDooZflpLTlsI/lkIM98J+MrQ0K5LiJ5piO5rK75pep6aSQ566A6aSQ5bel5L2c6aSQPfCfpaoNCuWhlOWPr+WiqOilv+WTpeWNt+mlvOWiqOilv+WTpemjjuWRs1RhY2898J+Mrg0K5ouJ6Z2i5rGk6Z2i5ZCD6Z2i5aSc5a6156Kz5rC05b+r5LmQPfCfjZwNCuWvv+WPuOaXpeaWmeeyvuiHtOmkkOeCuT3wn42jDQrppbrlrZDov4flubTlm57lrrbkuK3lm73nvo7po5898J+lnw0K54+N54+g5aW26Iy257ut5ZG95rC05LiL5Y2I6Iy255Sc5aa55b+F5aSHPfCfp4sNCuWSluWVoeaJk+W3peS6uue7reWRveaPkOelnuaXqUNDb2ZmZWU94piVDQrnu7/ojLbng63ojLbllp3ojLblhbvnlJ/lk4HlkbM98J+NtQ0K5Yaw5reH5reL5aSP5aSp55Sc5ZOB6Kej5pqRPfCfjaYNCuecvOmVnOijheWtpumcuOeci+a4healmj3wn5GTDQrloqjplZzoo4Xphbfpga7pmLM98J+Vtu+4jw0K6KGs6KGr6aKG5bim5q2j6KOF5LiK54+t5ZWG5YqhPfCfkZQNCui/nuiho+ijmeWls+ijheepv+aQrea8guS6rj3wn5GXDQrpq5jot5/pnovmgKfmhJ/miJDnhp/ml7blsJo98J+RoA0K6L+Q5Yqo6Z6L55CD6Z6L5r2u6Z6L6L+Q5Yqo5LyR6ZeyPfCfkZ8NCueah+WGoOeOi+iAheWls+eOi+esrOS4gOmrmOi0tT3wn5GRDQrlj6PnuqLnvo7lpobljJblpobnsr7oh7TlpbPnlJ898J+ShA0K5oiS5oyH5rGC5ama57uT5ama5om/6K+654+g5a6dPfCfko0NCuWPjOiCqeWMheS4iuWtpuWHuua4uOiDjOWMheWuoj3wn46SDQrnuqLoi7nmnpw98J+Njg0K6aaZ6JWJPfCfjYwNCuilv+eTnD3wn42JDQrokaHokIQ98J+Nhw0K6I2J6I6TPfCfjZMNCuaoseahgz3wn42SDQrmoYPlrZA98J+NkQ0K6I+g6JCdPfCfjY0NCueMleeMtOahgz3wn6WdDQrniZvmsrnmnpw98J+lkQ0K57Gz6aWtPfCfjZoNCuaEj+Wkp+WIqemdoj3wn42dDQrom4vns5U98J+NsA0K55Sc55Sc5ZyIPfCfjakNCumlvOW5sj3wn42qDQrllaTphZI98J+Nug0K57qi6YWSPfCfjbcNCumlruaWmT3wn6WkDQoNCiMjIyMjIyMjIyMjI+OAkPCfkrvml6XluLjnianlk4HkuI7nlLXlrZDnp5HmioDjgJENCuaJi+acuuWPkeW+ruS/oeWIt+aJi+acuuiBlOezu+aWueW8jz3wn5OxDQrnrJTorrDmnKznlLXohJHliqDnj63lhpnku6PnoIHlip7lhazmiZPmuLjmiI898J+Suw0K5Y+w5byP55S16ISR5bel5L2c56uZ55S156ue5oi/PfCflqXvuI8NCumUruebmOaJk+Wtl+mUruebmOS+oOWKnuWFrD3ijKjvuI8NCuebuOacuuaRhOW9seiusOW9leeUn+a0u+aXhea4uOaJk+WNoT3wn5O3DQrogLPmnLrlkKzmrYzmsonmtbjlvI/msonmgJ098J+Opw0K54Gv5rOh5pyJ54G15oSf5LqG54K55a2Q5Lqu5LqGPfCfkqENCuS5puexjeS5puacrOWtpuS5oOivu+S5puefpeivhuiAg+eglD3wn5OaDQrpk4XnrJTliJLnur/kv67mlLnorrDlvZXojYnnqL894pyP77iPDQrpkqXljJnlr4bnoIHop6Plr4blhbPplK7kuqTmiL898J+UkQ0K6ZKx6KKL5Y+R6LSi5pq05a+M6aKE566XPfCfkrANCuS/oeeUqOWNoeWIt+WNoea2iOi0ueS5sOS5sOS5sD3wn5KzDQrpl7npkp/ml6notbfmiZPljaHlgqzkv4PlgJLorqHml7Y94o+wDQrljIXoo7nlv6vpgJLmi4blv6vpgJLnvZHotK3lr4Tku7Y98J+Tpg0K56S854mp6YCB56S85oOK5Zac6IqC5pel56S854mpPfCfjoENCuaJi+ihqD3ijJoNCueUteaxoD3wn5SLDQrmj5LlpLQ98J+UjA0K55S16KeGPfCfk7oNCuWkh+W/mOW9lT3wn5OdDQrlm77pkok98J+TjA0K6ZSBPfCflJINCuS/oeWwgT3inInvuI8NCuawlOeQgz3wn46IDQrngavnhLA98J+UpQ0K6ZK755+zPfCfko4NCua4uOaIj+aJi+afhD3wn46uDQrmkYfmnYY98J+Vue+4jw0K6Z225b+DPfCfjq8NCumqsOWtkD3wn46yDQrogIHomY7mnLo98J+OsA0K5bCP5LiR54mM55m+5pCtPfCfg48NCvCfgIA98J+AgA0K8J+AgT3wn4CBDQrwn4CCPfCfgIINCuS4nOWNl+ilv+WMl+mjjum6u+WwhumjjueJjD3wn4CDDQrlpJbmmJ/mgKrniannu4/lhbjmuLjmiI/lvaLosaE98J+Rvg0K5py65Zmo5Lq6PfCfpJYNCg0KIyMjIyMjIyMjIyMj44CQ4piA77iP5aSp5rCU5LiO54ix5b+D44CRDQrlpKrpmLPmmbTlpKnlpKfmmbTlpKnpmLPlhYnlpb3lv4Pmg4U94piA77iPDQrlvK/mnIjlpJzmmZrmmZrlronnhqzlpJzlpJznjKvlrZA98J+MmQ0K6Zeq54OB55qE5pif5pif5Lqu55y85oOK6Imz5pif5pif55y8PfCfjJ8NCumHkeaYn+S6lOinkuaYn+aUtuiXj+aJk+WIhuS8mOengD3irZDvuI8NCuS5jOS6kemYtOWkqeW/g+aDheS9juiQvemYtOWkqT3imIHvuI8NCuS4i+mbqOS4i+mbqOWkqeW/g+aDhemDgemXtz3wn4yn77iPDQrpm6roirHkuIvpm6rlhrflhqzlpKnpmY3muKk94p2E77iPDQrpl6rnlLXpgJ/luqblv6vpm7flh7vpnIfmg4rpl6rnjrA94pqhDQrlvanombnnvo7lpb3pm6jov4flpKnmmbTlpJrlhYPljIXlrrk98J+MiA0K5LiL6Zuq6ZmN6Zuq5aSp5rCUPfCfjKjvuI8NCumbquS6uuaXoOiEuOWGrOWkqembquaZrz3im4QNCumbquS6uuacieiEuOWGrOWkqeWco+ivnuawm+WbtD3imIPvuI8NCumjjuiEuOWQueawlOWvkumjjuWRvOWQuD3wn4ys77iPDQrpm77pm77pnL7og73op4HluqbkvY498J+Mq++4jw0KZGFzaOespuWPt+W/q+mAn+enu+WKqOmjjuWRvOawlD3wn5KoDQrmsLTmu7Tpm6jmsLTmsZfmsLTnnLzms6o98J+Spw0K5rGX5ru05aSn6YeP5rGX5rC05Yqq5YqbPfCfkqYNCumbqOS8nuS4i+mbqOWkqemYsumbqD3imJQNCueBq+eEsOeCjueDreeBq+eBvua1geihjD3wn5SlDQrmuKnluqborqHpq5jmuKnlj5Hng6fmtYvph4898J+Moe+4jw0K5paw5pyI6IS456We56eY5bC05bCs55qE6KGo5oOFPfCfjJoNCuS4iuW8puaciOiEuOWknOaZmuedoeaEjz3wn4ybDQrkuIvlvKbmnIjohLjlpJzmmZrnhqzlpJw98J+MnA0K5ruh5pyI6IS45ZyG5ruh5piO5LquPfCfjJ0NCuWkqumYs+iEuOeCjueDreW8gOW/g+mYs+WFiT3wn4yeDQrmmbTpl7TlpJrkupHlpKfpg6jliIbmmbTlpKnlsJHph4/kupE98J+MpO+4jw0K5aSa5LqR5aSq6Ziz6KKr5LqR6YGu5L2PPeKbhQ0K6Zi06Ze05aSa5LqR5aSn6YOo5YiG6Zi05aSp5YG25bCU6KeB5aSq6ZizPfCfjKXvuI8NCuaZtOmXtOmYtembqOWkqumYs+WSjOmbqOWQjOaXtuWHuueOsD3wn4ym77iPDQrpm7fpm6jpm7fnlLXkuqTliqA98J+Mqe+4jw0K6Zu36Zuo5LqR5bim6Zeq55S155qE56ev6Zuo5LqRPeKbiO+4jw0K6b6Z5Y236aOO5peL6aOO6aOT6aOOPfCfjKrvuI8NCue6ouW/g+e7j+WFuOeDreeDiOeahOeIseWWnOasoj3inaTvuI8NCuapmeW/g+a4qeaaluWPi+aDheS7peS4ij3wn6ehDQrpu4Tlv4PnnJ/or5rpmLPlhYnnmoTniLE98J+Smw0K57u/5b+D5YGl5bq3546v5L+d5auJ5aaS6Iux5paH5qKXPfCfkpoNCuiTneW/g+e6r+a0geS/oeS7u+WGt+mFt+eahOeIsT3wn5KZDQrntKvlv4PmtarmvKvpq5jotLXov7flubs98J+SnA0K6buR5b+D5Zyw54ux56yR6K+d6IW56buR5LinPfCflqQNCueZveW/g+e6r+ecn+WSjOW5s+aXoOeRlT3wn6SNDQrmo5Xlv4Pphofljprlg4/lt6flhYvlipvkuIDmoLfnmoTniLE98J+kjg0K5b+D56KO5Lyk5b+D5YiG5omL6Zq+6L+HPfCfkpQNCuepuuW/g+W/gz3imaENCuaXi+i9rOW/gz3inaUNCuW/g+W9ouaEn+WPueWPtz3inaPvuI8NCuS4pOmil+W/gz3wn5KVDQrpl6rogIDnmoTlv4M98J+Slg0K6Lez5Yqo55qE5b+DPfCfkpcNCuWwhOS4reeIseW/gz3wn5KYDQrns7vluKbnmoTlv4M98J+SnQ0K5peL6L2s55qE5b+DPfCfkp4NCuaQj+WKqOeahOW/gz3wn5KTDQrlv4PlvaLoo4XppbA98J+Snw0KDQojIyMjIyMjIyMjIyPjgJDwn4+D6L+Q5Yqo5LiO5YGl6Lqr44CRDQrotrPnkIPkuJbnlYzmna/ov5DliqjouKLnkIM94pq9DQrnr67nkIPmiZPnkINOQkHov5Dliqg98J+PgA0K572R55CD572R55CD6L+Q5Yqo5YGl6LqrPfCfjr4NCuS4vumHjeWBpei6q+mTgeS6uuaSuOmTgeWBpei6q+aIv+aJk+WNoT3wn4+L77iPDQrnkZzkvL3lhqXmg7PmlL7mnb7miZPlnZDlv4PmgIHlubPnqLM98J+nmA0K6LeR5q2l5byA5rqc6LeR5q2l5Yay5Yi66LW25pe26Ze0PfCfj4MNCua4uOazs+Wkj+Wkqeino+aakea4uOazsz3wn4+KDQrmuLjmiI/miYvmn4TmiZPmuLjmiI/nlLXnq57lvIDpu5E98J+Org0K6aqw5a2Q5ou86L+Q5rCU6LWM5LiA5oqK6ZqP5py6PfCfjrINCuiwg+iJsuadv+e7mOeUu+iJuuacr+iuvuiuoeeUu+eUuz3wn46oDQrpuqblhYvpo47llLHmrYxLVFbmvJTorrLmkq3lrqI98J+OpA0K6Z+z56ym5ZCs5q2M5pyJ6Z+z5LmQ5oSfPfCfjrUNCuWkmumfs+espuasouW/q+eahOmfs+S5kOWUseatjD3wn462DQrlkInku5bmkYfmu5rlvLnllLHmsJHosKM98J+OuA0K6ZKi55C06ZSu55uY5Y+k5YW45LmQ5LyY6ZuF57uD55C0PfCfjrkNCueIteWjq+m8k+aJk+WHu+S5kOiKguWlj+aEn+WXqOi1t+adpT3wn6WBDQrokKjlhYvmlq/niLXlo6vpo47mtarmvKvlpJzlupc98J+Otw0K5bCP5Y+35ZC55Y+36L+b5Yab5a6j5biD5raI5oGvPfCfjroNCuWwj+aPkOeQtOmrmOmbheaLieW8pueFveaDhee9keS4iuW4uOeUqOadpeihqOi+vuS4uuS9oOaLieS4gOmmluaCsuS8pOeahOabsuWtkD3wn467DQrmqYTmpoTnkIM98J+PiA0K5qOS55CDPeKavg0K5o6S55CDPfCfj5ANCuWPsOeQgz3wn46xDQrkuZLkuZPnkIM98J+Pkw0K57695q+b55CDPfCfj7gNCumdtuW/gz3wn46vDQrmiI/liafpnaLlhbc98J+OrQ0K6ICz5py6PfCfjqcNCuWcuuiusOadvz3wn46sDQrnm7jmnLo98J+Ttw0K5bqG56WdPfCfjokNCuW9qeeQgz3wn46KDQrlpZbmna898J+Phg0K6YeR54mMPfCfpYcNCg0KIyMjIyMjIyMjIyMj44CQ4pqg77iP56ym5Y+35qCH6K6w44CRDQrorablkYrms6jmhI/po47pmanmj5DphpLmnInlnZE94pqg77iPDQrnpoHmraLkuI3ooYzkuKXnpoHmiZPkvY898J+aqw0K6ZSZ6K+v5Y+J5LiN5a+55ouS57ud5Y+W5raIPeKdjA0K5q2j56Gu5Yu+5a6M5oiQ6YCa6L+H5pCe5a6aPeKchQ0KMTAw5YiG5aSq5qOS5LqG5ruh5YiG55yf55CG5by654OI6LWe5ZCMPfCfkq8NCumXruWPt+acieeWkemXrueWkeaDkeWVpT3inZMNCuaEn+WPueWPt+W8uuiwg+azqOaEj+mHjeimgeaPkOmGkj3inZcNCua8qea2oeaZlei/t+iMq+a3t+S5sei9rOWciD3wn4yADQrml6DpmZDmsLjmgZLml6Dnqbfml6DpmZDlj6/og7094pm+77iPDQrnuqLlnIblnIjph43ngrnmnKror7vmj5DphpLlvZXliLbkuK098J+UtA0K57u/5ZyG5ZyI5Zyo57q/6YCa6L+H5a6J5YWoPfCfn6INCum7hOWchuWciOW+heWumuitpuWRij3wn5+hDQrnpoHmraLmoIforrDmlY/mhJ/pmZDliLY98J+Isg0K5YWN6LS55qCH6K6w56aP5YipRnJlZeiWhee+iuavmz3wn4aTDQrmoIfnrb7moIfniYzmoIforrDmoIfnrb7ku7fmoLzniYw98J+Pt++4jw0K5ZWG5qCH56ym5Y+35ZWG5qCH5ZOB54mM5qCH6K+GPeKEou+4jw0K5rOo5YaM5ZWG5qCH5bey5rOo5YaM5ZWG5qCHPcKu77iPDQrlgZzmraLmoIflv5flgZzovabmoIflv5fnpoHmraI98J+bkQ0K5Zue5pS25qCH5b+X546v5L+d5b6q546v5Yip55SoPeKZu++4jw0K5Yy755aX5qCH5b+X6JuH5p2W5Yy75a2m5qCH5b+XPeKale+4jw0K6L2u5qSF5qCH6K+G5peg6Zqc56KN5q6L55a+5Lq66K6+5pa9PeKZvw0K5qCH6K+t54mM5oqX6K6u56S65aiB5YWs5ZGK54mMPfCfqqcNCueZvee+iuW6p1UyNjQ4PeKZiA0K6YeR54mb5bqnVTI2NDk94pmJDQrlj4zlrZDluqdVMjY0QT3imYoNCuW3qOifueW6p1UyNjRCPeKZiw0K54uu5a2Q5bqnVTI2NEM94pmMDQrlpITlpbPluqdVMjY0RD3imY0NCuWkqeenpOW6p1UyNjRFPeKZjg0K5aSp6J2O5bqnVTI2NEY94pmPDQrlsITmiYvluqdVMjY1MD3imZANCuaRqee+r+W6p1UyNjUxPeKZkQ0K5rC055O25bqnVTI2NTI94pmSDQrlj4zpsbzluqdVMjY1Mz3imZMNCuibh+Wkq+W6p1UyNkNFPeKbjg0K57qi5LitPfCfgIQNCuWPkei0oj3wn4CFDQrnmb3mnb898J+Ahg0K6buR5qGDPeKZoA0K56m65b+D57qi5qGDPeKZoQ0K56m65b+D5pa55Z2XPeKZog0K5qKF6IqxPeKZow0K56m65b+D6buR5qGDPeKZpA0K57qi5qGDPeKZpQ0K5pa55Z2XVTI94pmmDQrpu5HmlrnlhbXlhbXljZLmnInlvanoibJFbW9qaeeJiOacrFUyNjVGPeKZnw0K6buR5qGD5omR5YWL54mM6Iqx6ImyPeKZoO+4jw0K57qi5b+D5omR5YWL54mM6Iqx6ImyPeKZpe+4jw0K5pa55Z2X5omR5YWL54mM6Iqx6ImyPeKZpu+4jw0K5qKF6Iqx5omR5YWL54mM6Iqx6Imy5omR5YWL54mMQeaJkeWFi+eJjEVtb2pp5a6M5pW0NTLlvKDlpKflsI/njos94pmj77iPDQrpkrHooovotKLlr4zph5HpkrE98J+SsA0K576O5YWD57q45biB576O5YWD546w6YeRPfCfkrUNCuaXpeWFg+e6uOW4geaXpeWFg+eOsOmHkT3wn5K0DQrmrKflhYPnurjluIHmrKflhYPnjrDph5E98J+Stg0K6Iux6ZWR57q45biB6Iux6ZWR546w6YeRPfCfkrcNCuW4pue/heiGgOeahOmSseiKsemSsei1hOmHkea1geWksT3wn5K4DQrkv6HnlKjljaHmlK/ku5jliLfljaE98J+Ssw0K6LSn5biB5YWR5o2i5aSW5rGH5o2i5rGHPfCfkrENCumHkemSseWYtOiEuOWPkei0oui0qui0oj3wn6SRDQrpk7booYzph5Hono3mnLrmnoQ98J+Ppg0K55m95pa5546L5Zu9546L5peg5Lu3PeKZlA0K55m95pa55ZCO546L5ZCO57qmOeWIhj3imZUNCueZveaWuei9puaImOi9puWfjuWgoee6pjXliIY94pmWDQrnmb3mlrnosaHkuLvmlZnnuqYz5YiGPeKZlw0K55m95pa56ams6aqR5aOr57qmM+WIhj3imZgNCueZveaWueWFteWFteWNkjHliIY94pmZDQrpu5Hmlrnnjovlm73njos94pmaDQrpu5HmlrnlkI7njovlkI494pmbDQrpu5HmlrnovabmiJjovabln47loKE94pmcDQrpu5HmlrnosaHkuLvmlZk94pmdDQrpu5HmlrnpqazpqpHlo6s94pmeDQrmiZHlhYvniYxB5omR5YWL54mMRW1vamnlrozmlbQ1MuW8oOWkp+Wwj+eOiz3wn4KhDQrlpJrnsbPor7rpqqjniYzlrozmlbTlpJrnsbPor7rniYznu4Q98J+Bow0K5Zyw55CDPfCfjI8NCueul+ebmD3wn6euDQrovpDlsITmoIflv5c94pii77iPDQrnlJ/nianljbHlrrM94pij77iPDQrmuKnms4k94pmo77iPDQpDT09MPfCfhpINCk5FVz3wn4aVDQpVUD3wn4aZDQrniYjmnYM9wqnvuI8NCueUt+aApz3imYLvuI8NCuWls+aApz3imYDvuI8NCui3qOaAp+WIqz3imqfvuI8NCuiTneWchj3wn5S1DQrnuqLmlrnlnZc98J+fpQ0K6JOd5pa55Z2XPfCfn6YNCue7v+aWueWdlz3wn5+pDQrpu4TmlrnlnZc98J+fqA0K57qi5LiJ6KeSPfCflLoNCuWAkue6ouS4ieinkj3wn5S7DQroj7HlvaLlnIbngrk98J+SoA0K55m957KX5pa55qGGPfCflLMNCum7keWkp+aWueWdlz3irJsNCueZveWkp+aWueWdlz3irJwNCum7keS4reaWueWdlz3il7zvuI8NCueZveS4reaWueWdlz3il7vvuI8NCuWbm+WIhumfs+espj3imakNCuWFq+WIhumfs+espj3imaoNCuWPjOWFq+WIhumfs+espj3imasNCuWNgeWFreWIhumfs+espj3imawNCumZjeWPtz3ima0NCuWNh+WPtz3ima8NCuWPjOaEn+WPueWPtz3igLzvuI8NCuaEn+WPuemXruWPtz3igYnvuI8NCueZveiJsumXruWPtz3inZQNCueZveiJsuaEn+WPueWPtz3inZUNCuazoua1que6v+mXtOmalOWPtz3jgLDvuI8NCuaYn+aYnz3irZANCumXquS6rueahOaYnz3wn4yfDQrpl6rng4E94pyoDQrmmZXnnKnmmJ898J+Sqw0K6Zi05b2x5pifPeKcsA0K56m65b+D5pifPeKcqQ0K5bim5ZyI5pifPeKcqg0K6Zi05b2x5pifXzI94pyvDQrlha3oipLmmJ894pyhDQrpm6roirE94p2E77iPDQrlrp7lv4Ppm6roirE94p2GDQrpm6roirFfMj3inYUNCuiKseactT3inL8NCuiKseactV8yPeKdgA0K5Zub6KeS5pifPeKcpw0K5Zub6KeS5pifXzI94pymDQrnspfkvZPlr7nli7494pyU77iPDQrli77pgInmoYY94piR77iPDQrlj4nlj7fmoYY94piSDQrnu7/oibLlj4nlj7c94p2ODQrnspfkvZPkuZjlj7flj4k94pyW77iPDQrnu4blj4k94pyVDQrmlpzlj4k94pyXDQrnspfmlpzlj4k94pyYDQrnuqLoibLlnIblnIg94q2VDQrljZXpgInmjInpkq498J+UmA0KDQojIyMjIyMjIyMjIyPjgJDwn5KK5Yy76I2v44CRDQroja/kuLjlkIPoja/nu63lkb3msrvnl4U98J+Sig0K5ZCs6K+K5Zmo5Yy755Sf5qOA5p+l5YGl5bq3PfCfqboNCuazqOWwhOWZqOaJk+mSiOeWq+iLl+aKveihgOaJk+mSiD3wn5KJDQrooYDmu7TnjK7ooYDlj5fkvKTnlJ/nkIbmnJ898J+puA0K5Yib5Y+v6LS05Y+X5Lyk5q2i6KGA5oqa5bmz5Yib5LykPfCfqbkNCuiCpeeagua0l+aJi+a4hea0geWNq+eUnz3wn6e8DQrkubPmtrLnk7bmtJfmiYvmtrLmtojmr5I98J+ntA0K54mZ5Yi35Y+j6IWU5Y2r55Sf5Yi354mZPfCfqqUNCumprOahtuWNq+eUn+mXtOaOkuazhD3wn5q9DQrmt4vmtbTmtJfmvqHmuIXmtIE98J+avw0K5rW057y45rOh5r6h5riF5rSBPfCfm4ENCueUn+eJqeWNseWus+eUn+eJqeWNsemZqeeXheavkuaxoeafkz3imKPvuI8NCui+kOWwhOaUvuWwhOaAp+aguOi+kOWwhD3imKLvuI8NCumqt+mrheS6pOWPiemqqOWJp+avkuWNsemZqeatu+S6oT3imKDvuI8NCuitpuWRiuazqOaEj+itpuekuj3imqDvuI8NCuWkp+iEkeelnue7j+eyvuelnuWBpeW6t+aZuuWKmz3wn6egDQrniZnpvb/niZnnp5Hlj6PohZTlgaXlurc98J+mtw0K6aqo5aS06aqo6aq86aqo56eRPfCfprQNCuW/g+iEj+ino+WJluW/g+iEj+W/g+ihgOeuoeWBpeW6tz3wn6uADQrogrrohI/ogrrpg6jlkbzlkLjns7vnu5898J+rgQ0K55y8552b55y856eR6KeG5YqbPfCfkYHvuI8NCljlsITnur/mi43niYfmlL7lsITmo4Dmn6U98J+puw0K5pi+5b6u6ZWc56eR56CU5qOA5rWL6KeC5a+fPfCflKwNCua4qeW6puiuoeS9k+a4qeWPkeeDp+a1i+mHjz3wn4yh77iPDQrmiLTlj6PnvannmoTohLjnlJ/nl4XpmLLmiqTnlqvmg4U98J+Ytw0K5ZCr5rip5bqm6K6h55qE6IS45Y+R54On55Sf55eFPfCfpJINCuaBtuW/g+iEuOaDs+WQkOS4jemAgj3wn6SiDQrlkZXlkJDohLjlkZXlkJDpo5/niankuK3mr5I98J+krg0K5omT5Za35ZqP55qE6IS45oSf5YaS6L+H5pWPPfCfpKcNCuWktOaZleiEuOecqeaZlemGiemFkuelnuW/l+S4jea4hT3wn6W0DQrlvq7nlJ/niannl4Xmr5Lnu4boj4znl4Xmr5Lnlqvmg4U98J+moA0K5Y+X5Lyk55qE6IS45aS06YOo5Y+X5Lyk5YyF5omOPfCfpJUNCueIhueCuOWktOmch+aDiueyvuelnuW0qea6gz3wn6SvDQrljLvpmaLlsLHljLvkvY/pmaLmgKXor4o98J+PpQ0K5pWR5oqk6L2m5oCl5pWR57Sn5oCl5Yy755aXPfCfmpENCuivleeuoeWunumqjOWMlumqjOajgOa1iz3wn6eqDQrln7nlhbvnmr/nu4boj4zln7nlhbvlvq7nlJ/niannoJTnqbY98J+nqw0KRE5B5Z+65Zug5Z+65Zug6YGX5Lyg55Sf54mp5oqA5pyvPfCfp6wNCuiSuOmmj+WZqOWMluWtpuWItuiNr+eCvOmHkeacrz3impfvuI8NCg0KIyMjIyMjIyMjIyMj44CQ8J+aqeaXl+W4nOOAkQ0K5pa55qC85peX57uI54K55peX6LWb6L2m57uI54K55q+U6LWb57uT5p2fPfCfj4ENCuS4ieinkuaXl+agh+iusOWcsOeCuemrmOWwlOWkq+eQg+a0nj3wn5qpDQrpu5Hml5fmtbfnm5fmipforq7pu5Hmmpc98J+PtA0K55m95peX5oqV6ZmN5ZKM5bmzPfCfj7PvuI8NCuW9qeiZueaXl0xHQlRR6aqE5YKy5pyIPfCfj7PvuI/igI3wn4yIDQrot6jmgKfliKvml5fot6jmgKfliKvnvqTkvZPlpJrlhYPmgKfliKs98J+Ps++4j+KAjeKap++4jw0K5rW355uX5peX5rW355uX5YaS6Zmp6aq36auF5peXPfCfj7TigI3imKDvuI8NCg==
+;########################################################################################################### emoji.txt

@@ -21,3 +21,4 @@ MouseIsOver(winTitle) {
     MouseGetPos ,, &winHandle
     return WinExist(winTitle " ahk_id " winHandle)
 }
+
