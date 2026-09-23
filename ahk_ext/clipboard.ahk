@@ -721,7 +721,7 @@ STORE_HOST   := "clips.store"
 ; 禁止用 *.local —— Windows mDNS 会卡 ~2–3s（与 HTML 大小无关）
 APP_HOST     := "clipui.app"
 ; Navigate cache key —固定版本；禁止每次启动用 mtime/A_Now 逼全量重载
-UI_CACHE_VER := "20260920-no-emoji"
+UI_CACHE_VER := "20260922-emoji-enter"
 DEBUG_LOG    := CLIP_V1_DIR "\debug.log"
 ERROR_LOG    := CLIP_V1_DIR "\error.log"
 QUEUE_STATE_FILE := CLIP_V1_DIR "\paste_queue.json"
@@ -4871,6 +4871,14 @@ global qqNeedRelease := false
 global qqPanelPlaced := false
 global qqMarkCount := 0
 global qqAwaitKeyword := false
+global qqEmojiMode := false          ; ??? / ？？？ 表情搜索（拼音），?? 仍是剪贴板历史
+global emojiIndex := []
+global emojiIndexReady := false
+global emojiIndexStamp := ""
+global pyMap := Map()
+global pyMapReady := false
+global emojiHitCache := []
+global emojiHitQuery := ""
 global linkMetaQueue := []
 global linkMetaPausedUntil := 0
 global wvBuilding := false
@@ -4931,13 +4939,14 @@ $^f::PanelOpenSearch("")
 F2::PanelKeyEditTitle("")
 #HotIf
 
-; ?? 搜索中（面板可能已 SoftHide）：Esc 结束本次搜索
+; ?? / ??? 搜索中：Esc 取消；Enter 粘贴（必须拦掉，否则落到 Slack 等会当成发消息）
 #HotIf qqSearchOn
 Esc::EscHidePanel("")
+Enter::PanelKeyEnter("")
 #HotIf
 
 ; Unpinned: arrows / Enter / Esc hide
-#HotIf ClipPanelIsUp() && !uiPinned
+#HotIf ClipPanelIsUp() && !uiPinned && !qqSearchOn
 Up::PanelKeyUp("")
 Down::PanelKeyDown("")
 Enter::PanelKeyEnter("")
@@ -4945,6 +4954,13 @@ Esc::EscHidePanel("")
 ~LButton::OnOutsideClick("")
 ~LAlt::EscHidePanel("")
 ~RAlt::EscHidePanel("")
+#HotIf
+
+; 搜索中面板已弹出：方向键仍可用（Enter 已在 qqSearchOn 分支）
+#HotIf ClipPanelIsUp() && !uiPinned && qqSearchOn
+Up::PanelKeyUp("")
+Down::PanelKeyDown("")
+~LButton::OnOutsideClick("")
 #HotIf
 
 ; Pinned: arrows still navigate；回车不粘贴（点条目才粘贴）
@@ -5855,6 +5871,9 @@ ResolvePrevActiveWin(cur := 0) {
 
 RememberGoodActiveWin(*) {
     global lastGoodActiveWin, guiWin, panelVisible, prevActiveWin
+    ; 面板隐藏时不轮询前台窗（ShowPanel 会 ResolvePrevActiveWin）；固定显示才需要持续跟踪
+    if !panelVisible
+        return
     try {
         cur := WinGetID("A")
         if !cur
@@ -5867,9 +5886,7 @@ RememberGoodActiveWin(*) {
         if IsShellOverlayHwnd(cur) || IsScreenshotHelperHwnd(cur)
             return
         lastGoodActiveWin := cur
-        ; 固定显示期间也记住最近编辑窗，方便多次粘贴
-        if panelVisible
-            prevActiveWin := cur
+        prevActiveWin := cur
     }
 }
 
@@ -6255,7 +6272,7 @@ QQClearSearchState(*) {
 }
 
 QQAbortSearch(*) {
-    ; Esc / ??? / 超时取消：结束镜像，不保留脏查询；下次需重新 ??
+    ; Esc / ???? / 超时取消：结束镜像；??? 是表情搜索不是取消
     QQClearSearchState()
     QQStopSearch(true)
 }
@@ -6284,22 +6301,27 @@ QQOnQuestion(*) {
     qqMarkCount += 1
     SetTimer(QQResetMarkCount, -700)
 
-    if qqMarkCount >= 3 {
-        ; ??? → 不触发搜索，清掉刚武装的状态
+    if qqMarkCount >= 4 {
+        ; ???? → 取消
         SetTimer(QQResetMarkCount, 0)
         qqMarkCount := 0
         QQAbortSearch()
         return
     }
+    if qqMarkCount = 3 {
+        ; ??? / ？？？ → 表情搜索（等关键字才出 UI，同 ??）
+        QQArmEmojiSearch()
+        return
+    }
     if qqMarkCount = 2 {
-        ; ?? → 清空旧条件，等待关键字；尚未出 UI
+        ; ?? → 剪贴板历史搜索
         QQArmFreshSearch()
     }
 }
 
 ; 重新打 ??：清空之前的查询条件，只武装、不弹窗
 QQArmFreshSearch(*) {
-    global qqSearchOn, qqQuery, qqIh, qqAwaitKeyword, qqPanelPlaced
+    global qqSearchOn, qqQuery, qqIh, qqAwaitKeyword, qqPanelPlaced, qqEmojiMode
         , prevActiveWin, lastCaretX, lastCaretY, hasCaretPos, guiWin
     SetTimer(QQClearPending, 0)
     SetTimer(QQApplyQueryView, 0)
@@ -6328,6 +6350,7 @@ QQArmFreshSearch(*) {
     qqQuery := ""
     qqAwaitKeyword := true
     qqSearchOn := true
+    qqEmojiMode := false
     SoftHidePanel()
     try {
         global wvCore
@@ -6339,6 +6362,8 @@ QQArmFreshSearch(*) {
     qqIh.OnChar := QQOnChar
     qqIh.KeyOpt("{Backspace}", "N")
     qqIh.KeyOpt("{Escape}", "N")  ; Esc → OnKeyDown 结束本次搜索
+    qqIh.KeyOpt("{Enter}", "NS")  ; 拦截回车，避免 Slack/微信当成发送
+    qqIh.KeyOpt("{NumpadEnter}", "NS")
     qqIh.OnKeyDown := QQOnKeyDown
     qqIh.Start()
     QQScheduleAwaitTimeout()
@@ -6347,17 +6372,33 @@ QQArmFreshSearch(*) {
     SetTimer(WarmSearchPools, -1)
 }
 
+; ??? / ？？？：表情搜索。若刚打完 ?? 已挂好钩子，只切模式
+QQArmEmojiSearch(*) {
+    global qqEmojiMode, qqSearchOn, qqIh, qqQuery, qqAwaitKeyword, wvCore
+    if !qqSearchOn || !IsObject(qqIh)
+        QQArmFreshSearch()
+    qqEmojiMode := true
+    qqQuery := ""
+    qqAwaitKeyword := true
+    qqSearchOn := true
+    SoftHidePanel()
+    try {
+        if IsObject(wvCore)
+            wvCore.ExecuteScriptAsync("window.__setSearchQuery&&window.__setSearchQuery('')")
+    }
+    QQScheduleAwaitTimeout()
+    QQWakeWebView()
+    SetTimer(EnsureEmojiSearchIndex, -1)
+}
+
 QQOnChar(ih, ch) {
     global qqQuery, qqAwaitKeyword, qqMarkCount
     if ch = "" || ch = "`b" || ch = "`r" || ch = "`n"
         return
-    ; 问号只用于武装/取消，不进查询串（避免 ?? 重输时污染关键字）
-    if QQIsQuestionChar(ch) {
-        if qqAwaitKeyword || qqQuery = ""
-            QQAbortSearch()
+    ; 问号只用于 ?? / ??? 武装（热键计数），不进查询、这里不取消
+    if QQIsQuestionChar(ch)
         return
-    }
-    ; ?? 后的前导空格/制表不触发搜索（?? wiki 里的空格应忽略；纯 ??+空格也不开搜）
+    ; ?? / ??? 后的前导空格/制表不触发搜索
     if qqAwaitKeyword && (ch = " " || ch = "`t") {
         QQScheduleAwaitTimeout()
         return
@@ -6381,6 +6422,10 @@ QQOnKeyDown(ih, vk, sc) {
             QQScheduleAwaitTimeout()
         }
         QQOnQueryChanged()
+        return
+    }
+    if vk = 13 || vk = 1072 { ; Enter / NumpadEnter（已 NS 拦截，不会进目标窗）
+        PanelKeyEnter()
         return
     }
     if vk = 27 {
@@ -6458,7 +6503,8 @@ QQAttachUi(*) {
 
 QQStopSearch(resetFlag := true) {
     global qqIh, qqSearchOn, qqPending, qqNeedRelease, qqPanelPlaced, qqQuery
-        , qqAwaitKeyword, qqMarkCount
+        , qqAwaitKeyword, qqMarkCount, qqEmojiMode, clips, viewQuery
+        , emojiHitCache, emojiHitQuery
     SetTimer(QQAttachUi, 0)
     SetTimer(QQWatchQuestionRelease, 0)
     SetTimer(QQClearPending, 0)
@@ -6474,27 +6520,331 @@ QQStopSearch(resetFlag := true) {
         qqIh := 0
     }
     if resetFlag {
+        wasEmoji := qqEmojiMode
+        qqEmojiMode := false
         qqSearchOn := false
         qqPanelPlaced := false
         qqQuery := ""
+        ; 表情结果不是剪贴板历史。清掉 clips，但保留 emojiHitCache 供粘贴 ResolveClip
+        if wasEmoji {
+            clips := []
+            viewQuery := ""
+            ; emojiHitCache / emojiHitQuery 留给紧随其后的 PasteItem
+        }
     }
 }
 
 QQTypedEraseCount(*) {
-    global qqSearchOn, qqQuery
+    global qqSearchOn, qqQuery, qqEmojiMode
     if !qqSearchOn
         return 0
-    ; ?? / ？？ 各 2 字 + 关键字
-    return 2 + StrLen(String(qqQuery))
+    ; ?? = 2；??? 表情 = 3；再加上关键字
+    marks := qqEmojiMode ? 3 : 2
+    return marks + StrLen(String(qqQuery))
 }
 
 QQEraseTypedInEditor(n) {
     n := Integer(n)
     if n < 1
         return
-    Sleep 20
-    Send("{BS " n "}")
-    Sleep 20
+    Sleep 25
+    SendInput("{BS " n "}")
+    Sleep 30
+}
+
+; 仅还焦点，不点鼠标、不还原窗口尺寸（避免 Slack 缩窗 / 点到别的页）
+ForceActivateHwnd(hwnd) {
+    hwnd := Integer(hwnd)
+    if hwnd < 1 || !DllCall("IsWindow", "Ptr", hwnd, "Int")
+        return false
+    try {
+        fg := DllCall("GetForegroundWindow", "Ptr")
+        tidT := DllCall("GetWindowThreadProcessId", "Ptr", hwnd, "UInt*", 0, "UInt")
+        tidF := DllCall("GetWindowThreadProcessId", "Ptr", fg, "UInt*", 0, "UInt")
+        attached := false
+        if tidF && tidT && tidF != tidT {
+            DllCall("AttachThreadInput", "UInt", tidF, "UInt", tidT, "Int", 1)
+            attached := true
+        }
+        DllCall("SetForegroundWindow", "Ptr", hwnd)
+        if attached
+            DllCall("AttachThreadInput", "UInt", tidF, "UInt", tidT, "Int", 0)
+    } catch {
+        try DllCall("SetForegroundWindow", "Ptr", hwnd)
+    }
+    return true
+}
+
+; 表情 uid 不进剪贴板库，避免收藏/删除去扫盘
+IsEmojiSearchUid(uid) {
+    return Integer(uid) >= 1800000000
+}
+
+PinyinMapPath() {
+    return A_ScriptDir "\data\pinyin_map.txt"
+}
+
+EmojiConfigPath() {
+    home := ""
+    try home := Trim(EnvGet("HELPME_HOME"))
+    if home != "" {
+        p := RTrim(home, "\/") "\command_ext\ahk\config\emoji.txt"
+        if FileExist(p)
+            return p
+    }
+    return A_ScriptDir "\data\emoji.txt"
+}
+
+LoadPinyinMap(*) {
+    global pyMap, pyMapReady
+    if pyMapReady
+        return
+    pyMap := Map()
+    path := PinyinMapPath()
+    if !FileExist(path) {
+        ClipLog("pinyin map missing " path)
+        pyMapReady := true
+        return
+    }
+    ; 必须用 FileOpen UTF-8：Loop Read 的第二参数是输出文件，不是编码
+    try {
+        f := FileOpen(path, "r", "UTF-8")
+        while !f.AtEOF {
+            line := Trim(f.ReadLine())
+            if line = "" || SubStr(line, 1, 1) = "#"
+                continue
+            sp := InStr(line, " ")
+            if sp < 2
+                continue
+            pyMap[SubStr(line, 1, sp - 1)] := StrLower(Trim(SubStr(line, sp + 1)))
+        }
+        f.Close()
+    } catch as e {
+        ClipLog("pinyin map read fail: " e.Message)
+    }
+    pyMapReady := true
+    ClipLog("pinyin map n=" pyMap.Count)
+}
+
+EmojiKeyPinyin(key, &initials) {
+    global pyMap
+    py := ""
+    ini := ""
+    if !IsObject(pyMap)
+        pyMap := Map()
+    for ch in StrSplit(String(key)) {
+        if pyMap.Has(ch) {
+            p := pyMap[ch]
+            py .= p
+            if p != ""
+                ini .= SubStr(p, 1, 1)
+        } else if RegExMatch(ch, "^[A-Za-z0-9]$") {
+            p := StrLower(ch)
+            py .= p
+            ini .= p
+        }
+    }
+    initials := ini
+    return py
+}
+
+EnsureEmojiSearchIndex(*) {
+    global emojiIndex, emojiIndexReady, emojiIndexStamp, pyMap, pyMapReady, emojiHitQuery
+    LoadPinyinMap()
+    path := EmojiConfigPath()
+    stamp := path "|" (pyMapReady ? pyMap.Count : 0)
+    if FileExist(path)
+        stamp .= "|" FileGetTime(path, "M")
+    if emojiIndexReady && emojiIndexStamp = stamp
+        return
+    emojiIndex := []
+    group := ""
+    seen := Map()
+    n := 0
+    if FileExist(path) {
+        try {
+            f := FileOpen(path, "r", "UTF-8")
+            while !f.AtEOF {
+                line := Trim(f.ReadLine())
+                if line = ""
+                    continue
+                if RegExMatch(line, "^#{3,}.*【(.+)】", &gm) {
+                    group := gm[1]
+                    continue
+                }
+                if SubStr(line, 1, 1) = "#"
+                    continue
+                eq := InStr(line, "=")
+                if eq < 2
+                    continue
+                key := Trim(SubStr(line, 1, eq - 1))
+                face := Trim(SubStr(line, eq + 1))
+                if key = "" || face = ""
+                    continue
+                sig := face "|" key
+                if seen.Has(sig)
+                    continue
+                seen[sig] := true
+                n += 1
+                ini := ""
+                py := EmojiKeyPinyin(key, &ini)
+                emojiIndex.Push({
+                    uid: 1800000000 + n,
+                    face: face,
+                    key: key,
+                    group: group,
+                    py: py,
+                    pyU: StrReplace(py, "v", "u"),
+                    ini: ini
+                })
+            }
+            f.Close()
+        } catch as e {
+            ClipLog("emoji index read fail: " e.Message)
+        }
+    }
+    emojiIndexStamp := stamp
+    emojiIndexReady := true
+    emojiHitQuery := ""
+    ClipLog("emoji index n=" emojiIndex.Length " file=" path)
+}
+
+EmojiRecToClip(rec) {
+    ; 上：汉字解释；下：只拼音（不显示组名）
+    return {
+        uid: rec.uid,
+        type: "emoji",
+        data: rec.face,
+        preview: rec.py,
+        favTitle: rec.key,
+        time: FormatTime(, "yyyy-MM-dd HH:mm:ss"),
+        pinned: false,
+        pasted: false,
+        charCount: StrLen(rec.key),
+        fileCount: 0,
+        width: 0,
+        height: 0
+    }
+}
+
+EmojiTermHit(rec, term) {
+    t := StrLower(Trim(String(term)))
+    if t = ""
+        return false
+    tU := StrReplace(t, "v", "u")
+    if rec.pyU != "" && InStr(rec.pyU, tU)
+        return true
+    if rec.py != "" && InStr(rec.py, t)
+        return true
+    if InStr(StrLower(rec.key), t)
+        return true
+    if StrLen(t) >= 2 && (rec.ini = t || InStr(rec.ini, t) = 1)
+        return true
+    return false
+}
+
+EmojiRecMatches(rec, q) {
+    q := StrLower(Trim(String(q)))
+    if q = ""
+        return false
+    ; 与历史搜索一致：空格 / | 都是分词，各项须同时命中
+    terms := []
+    for part in StrSplit(q, "|") {
+        for term in StrSplit(Trim(part), " `t") {
+            term := Trim(term)
+            if term != ""
+                terms.Push(term)
+        }
+    }
+    if terms.Length < 1
+        return false
+    for term in terms {
+        if !EmojiTermHit(rec, term)
+            return false
+    }
+    return true
+}
+
+EmojiRecPrefixScore(rec, q) {
+    ; 排序：整段拼音前缀 > 首词前缀 > 其它
+    compact := StrLower(RegExReplace(Trim(String(q)), "[\s|]+", ""))
+    compactU := StrReplace(compact, "v", "u")
+    if compactU != "" && InStr(rec.pyU, compactU) = 1
+        return 0
+    first := ""
+    for part in StrSplit(StrLower(Trim(String(q))), "|") {
+        for term in StrSplit(Trim(part), " `t") {
+            if Trim(term) != "" {
+                first := StrReplace(Trim(term), "v", "u")
+                break
+            }
+        }
+        if first != ""
+            break
+    }
+    if first != "" && InStr(rec.pyU, first) = 1
+        return 1
+    if first != "" && InStr(StrLower(rec.key), first) = 1
+        return 1
+    return 2
+}
+
+QueryEmojiHits(query, offset, limit) {
+    global emojiIndex, emojiHitCache, emojiHitQuery
+    EnsureEmojiSearchIndex()
+    q := Trim(String(query))
+    all := []
+    if emojiHitQuery = q && IsObject(emojiHitCache) {
+        all := emojiHitCache
+    } else {
+        buckets := [[], [], []]
+        if IsObject(emojiIndex) {
+            for rec in emojiIndex {
+                if !EmojiRecMatches(rec, q)
+                    continue
+                score := EmojiRecPrefixScore(rec, q)
+                buckets[score + 1].Push(rec)
+            }
+        }
+        for bi in [1, 2, 3] {
+            for rec in buckets[bi]
+                all.Push(EmojiRecToClip(rec))
+        }
+        emojiHitCache := all
+        emojiHitQuery := q
+    }
+    items := []
+    total := all.Length
+    i := Integer(offset) + 1
+    n := 0
+    lim := Integer(limit)
+    while i <= total && n < lim {
+        items.Push(all[i])
+        i += 1
+        n += 1
+    }
+    return { items: items, total: total }
+}
+
+LoadMoreEmojiHits(*) {
+    global clips, viewTotal, VIEW_PAGE_SIZE, lastAppendCount, wvCore, emojiHitCache
+    if !IsObject(emojiHitCache)
+        emojiHitCache := []
+    viewTotal := emojiHitCache.Length
+    added := 0
+    i := clips.Length + 1
+    while i <= emojiHitCache.Length && added < VIEW_PAGE_SIZE {
+        clips.Push(emojiHitCache[i])
+        i += 1
+        added += 1
+    }
+    lastAppendCount := added
+    if IsObject(wvCore) {
+        if added > 0
+            PushClips(true)
+        else
+            try wvCore.ExecuteScriptAsync("window.__loadMoreDone&&window.__loadMoreDone()")
+    }
 }
 
 OnOutsideClick(*) {
@@ -6666,7 +7016,7 @@ OnUiNavigationCompleted(core, args) {
 UiCacheVer(*) {
     global UI_CACHE_VER
     if UI_CACHE_VER = ""
-        UI_CACHE_VER := "20260920-no-emoji"
+        UI_CACHE_VER := "20260922-emoji-enter"
     return UI_CACHE_VER
 }
 
@@ -6714,6 +7064,7 @@ PaintAllFirstPage(*) {
     EnqueueDiskJob(PruneOldScreenshots)
     ; 首屏后再建搜索索引，避免 ?? 第一次敲字才全库扫盘
     SetTimer(WarmSearchPools, -250)
+    SetTimer(EnsureEmojiSearchIndex, -800)
     if qqSearchOn
         SetTimer(QQAttachUi, -40)
 }
@@ -7515,6 +7866,9 @@ FlushUiPush(*) {
     uiPushPending := false
     if !IsObject(wvCore)
         return
+    ; 面板隐藏时不往 WebView 推 JSON（仍吃 CPU）；下次 ShowPanel 会 RequestUiPush
+    if !panelVisible
+        return
     ; 搜索扫盘中途勿推旧列表
     if viewApplying && Trim(String(viewQuery)) != "" {
         uiPushPending := true
@@ -7973,6 +8327,11 @@ ClipsListToJson(list, append := false) {
                 data := preview
             if preview = ""
                 preview := data
+        } else if c.type = "emoji" {
+            ; 列表要带上表情本身，供左侧大图标；正文是解释+拼音
+            data := String(c.HasProp("data") ? c.data : "")
+            if preview = "" && c.HasProp("favTitle")
+                preview := String(c.favTitle)
         } else {
             data := ""
             if preview = "" && c.HasProp("data") && c.data != ""
@@ -8033,13 +8392,15 @@ JsonStr(s) {
 }
 
 PasteItem(uid) {
-    global prevActiveWin, clipIgnore, uiPinned, pasteQueueMode
+    global prevActiveWin, clipIgnore, uiPinned, pasteQueueMode, qqSearchOn, qqIh
     ; Manual panel paste aborts active FIFO queue (keep original paste flow)
     if pasteQueueMode
         ExitPasteQueue("panel-paste")
     item := ResolveClip(uid)
-    if !IsObject(item)
+    if !IsObject(item) {
+        ClipLog("PasteItem miss uid=" uid)
         return
+    }
     if StrLower(String(item.type)) = "recent" {
         path := item.HasProp("data") ? String(item.data) : String(item.preview)
         OpenFolderDir(path)
@@ -8047,41 +8408,79 @@ PasteItem(uid) {
     }
 
     eraseN := QQTypedEraseCount()
-    ; 未固定：先藏面板再粘贴；固定：保持 UI，粘贴到原编辑光标处
-    if !uiPinned
-        HidePanel()
+    wasQQ := qqSearchOn
+    itemType := StrLower(String(item.type))
+    isEmoji := (itemType = "emoji")
+
+    ; 先停输入钩子，避免退格/粘贴被钩子吃掉；搜索态只 SoftHide，少扰动目标窗
+    if IsObject(qqIh) {
+        try qqIh.Stop()
+        qqIh := 0
+    }
+    if !uiPinned {
+        if wasQQ
+            SoftHidePanel()
+        else
+            HidePanel()
+    }
 
     clipIgnore := true
     try {
         ok := false
-        if item.type = "file" {
+        if itemType = "file" {
             paths := GetItemFilePaths(item)
             if paths.Length
                 ok := SetClipboardFiles(paths)
-        } else if item.type = "image" {
+        } else if itemType = "image" {
             paths := BuildAhkNamedPastePaths([item])
             if paths.Length
                 ok := SetClipboardFiles(paths)
         }
-        if !ok && !PutItemOnClipboard(item)
-            return
-        MarkItemsPasted([item.uid])
-        target := ResolvePasteTargetWin()
-        if target {
-            DllCall("SetForegroundWindow", "Ptr", target)
-            Sleep 15
+
+        textBody := ""
+        if itemType = "text" || itemType = "link" || isEmoji {
+            if isEmoji
+                textBody := String(item.HasProp("data") ? item.data : "")
+            else {
+                EnsureClipBodyLoaded(item)
+                textBody := item.HasProp("data") ? String(item.data) : ""
+            }
+            if textBody = "" {
+                ClipLog("PasteItem empty text uid=" uid " type=" itemType)
+                return
+            }
+            A_Clipboard := textBody
+            ok := true
+        } else if !ok {
+            if !PutItemOnClipboard(item) {
+                ClipLog("PasteItem PutClip fail uid=" uid " type=" itemType)
+                return
+            }
+            ok := true
         }
+
+        if !isEmoji
+            MarkItemsPasted([item.uid])
+
+        target := ResolvePasteTargetWin()
+        if target
+            ForceActivateHwnd(target)
+        Sleep 50
         QQEraseTypedInEditor(eraseN)
+        Sleep 20
         TriggerPasteKey()
+        ClipLog("PasteItem ok uid=" uid " type=" itemType " erase=" eraseN " qq=" (wasQQ ? 1 : 0))
     } finally {
-        SetTimer(() => (clipIgnore := false), -400)
+        if wasQQ
+            QQAbortSearch()
+        SetTimer(() => (clipIgnore := false), -500)
         if uiPinned
             SetTimer(RaiseClipboardPanel, -50)
     }
 }
 
 PasteMany(idsStr, sepToken := "") {
-    global prevActiveWin, clipIgnore, uiPinned, pasteQueueMode
+    global prevActiveWin, clipIgnore, uiPinned, pasteQueueMode, qqSearchOn, qqIh
     if pasteQueueMode
         ExitPasteQueue("panel-paste-many")
     items := []
@@ -8109,7 +8508,7 @@ PasteMany(idsStr, sepToken := "") {
     if sepTok != "" {
         allText := true
         for it in items {
-            if !(it.type = "text" || it.type = "link") {
+            if !(it.type = "text" || it.type = "link" || it.type = "emoji") {
                 allText := false
                 break
             }
@@ -8117,25 +8516,40 @@ PasteMany(idsStr, sepToken := "") {
         if allText {
             parts := []
             for it in items {
-                EnsureClipBodyLoaded(it)
-                parts.Push(it.HasProp("data") ? String(it.data) : "")
+                if it.type = "emoji"
+                    parts.Push(String(it.HasProp("data") ? it.data : ""))
+                else {
+                    EnsureClipBodyLoaded(it)
+                    parts.Push(it.HasProp("data") ? String(it.data) : "")
+                }
             }
             joined := JoinClipPartsWithSep(parts, sepTok)
             eraseN := QQTypedEraseCount()
-            if !uiPinned
-                HidePanel()
+            wasQQ := qqSearchOn
+            if IsObject(qqIh) {
+                try qqIh.Stop()
+                qqIh := 0
+            }
+            if !uiPinned {
+                if wasQQ
+                    SoftHidePanel()
+                else
+                    HidePanel()
+            }
             clipIgnore := true
             try {
                 A_Clipboard := joined
                 MarkItemsPasted(uids)
                 target := ResolvePasteTargetWin()
-                if target {
-                    DllCall("SetForegroundWindow", "Ptr", target)
-                    Sleep 30
-                }
+                if target
+                    ForceActivateHwnd(target)
+                Sleep 50
                 QQEraseTypedInEditor(eraseN)
+                Sleep 20
                 TriggerPasteKey()
             } finally {
+                if wasQQ
+                    QQAbortSearch()
                 SetTimer(() => (clipIgnore := false), -500)
                 if uiPinned
                     SetTimer(RaiseClipboardPanel, -50)
@@ -8556,7 +8970,7 @@ PutItemOnClipboard(item) {
         A_Clipboard := item.data
         return true
     }
-    if item.type = "text" || item.type = "link" {
+    if item.type = "text" || item.type = "link" || item.type = "emoji" {
         EnsureClipBodyLoaded(item)
         data := item.HasProp("data") ? String(item.data) : ""
         if data = ""
@@ -8579,7 +8993,7 @@ CopyById(uid) {
             A_Clipboard := item.data
         return
     }
-    if item.type = "text" || item.type = "link"
+    if item.type = "text" || item.type = "link" || item.type = "emoji"
         A_Clipboard := item.data
 }
 
@@ -8830,6 +9244,8 @@ DiskReplaceItemLine(item) {
 DeleteItem(uid) {
     global clips, viewTotal, wvCore, lastTxt, lastImg, pasteQueueMode, pasteQueueIds, queueMetaMap
     uid := Integer(uid)
+    if IsEmojiSearchUid(uid)
+        return
     ; Optimistic UI: remove from memory first, disk later — 禁止 ResolveClip 全盘扫描
     imgFile := ""
     itemType := ""
@@ -8886,6 +9302,8 @@ DeleteItemsMany(idsStr) {
 PinItem(uid) {
     global clips, viewTab, viewQuery, viewToday, wvCore, viewCache, recentFolders
     uid := Integer(uid)
+    if IsEmojiSearchUid(uid)
+        return
     if IsObject(recentFolders) {
         for c in recentFolders {
             if !IsObject(c) || Integer(c.uid) != uid
@@ -9165,7 +9583,13 @@ MarkItemsPasted(uids) {
                 c.pasted := true
         }
     }
-    EnqueueDiskJob(DiskSetPasted.Bind(want, true))
+    diskWant := Map()
+    for id, _ in want {
+        if !IsEmojiSearchUid(id)
+            diskWant[id] := true
+    }
+    if diskWant.Count
+        EnqueueDiskJob(DiskSetPasted.Bind(diskWant, true))
     ; Instant ✓ — inject even if panel just hid (FIFO paste); WebView keeps DOM
     if IsObject(wvCore) && idList.Length {
         jsIds := ""
@@ -10228,6 +10652,9 @@ ParseNdjsonLineFast(line) {
         item.data := JsonFieldStr(line, "data")
         if item.preview = "" && (item.type = "text" || item.type = "link" || item.type = "file")
             item.preview := SubStr(item.data, 1, 500)
+        ; 修复：file 缩略图曾误清 data，preview 仍在 → 读回时还原路径
+        if item.type = "file" && item.data = "" && item.preview != ""
+            item.data := item.preview
         if !item.isMd && (item.type = "text" || item.type = "link")
             item.isMd := TextLooksLikeMarkdown(item.preview != "" ? item.preview : item.data)
         if item.type = "file"
@@ -11868,10 +12295,32 @@ ClusterFavGroupsInPlace(items) {
 }
 
 ResolveClip(uid) {
-    global clips, liveFront, PAYLOAD_DIR, recentFolders
+    global clips, liveFront, PAYLOAD_DIR, recentFolders, emojiHitCache, emojiIndex
     uid := Integer(uid)
     if uid < 1
         return ""
+    ; 表情结果不在剪贴板库；优先命中缓存/索引，避免扫盘空转
+    if IsEmojiSearchUid(uid) {
+        if IsObject(emojiHitCache) {
+            for c in emojiHitCache {
+                if IsObject(c) && Integer(c.uid) = uid
+                    return c
+            }
+        }
+        if IsObject(clips) {
+            for c in clips {
+                if IsObject(c) && Integer(c.uid) = uid
+                    return c
+            }
+        }
+        if IsObject(emojiIndex) {
+            for rec in emojiIndex {
+                if Integer(rec.uid) = uid
+                    return EmojiRecToClip(rec)
+            }
+        }
+        return ""
+    }
     if IsObject(recentFolders) {
         for c in recentFolders {
             if IsObject(c) && Integer(c.uid) = uid
@@ -12624,7 +13073,9 @@ ApplyImgFileLocal(uid, imgFile) {
     for c in clips {
         if c.uid = uid {
             c.imgFile := imgFile
-            c.data := ""
+            ; 仅截图位图可清空 data（已落盘 imgFile）；file 类型的 data 是路径，清掉会导致「最新图片丢了」
+            if c.type = "image"
+                c.data := ""
             break
         }
     }
@@ -12634,7 +13085,8 @@ ApplyImgFileLocal(uid, imgFile) {
         for c in entry.items {
             if c.uid = uid {
                 c.imgFile := imgFile
-                c.data := ""
+                if c.type = "image"
+                    c.data := ""
                 break
             }
         }
@@ -12682,7 +13134,7 @@ PruneOldScreenshots(*) {
     pages := m["pages"]
     if !IsObject(pages) || !pages.Length
         return
-    ; Newest-first (page order): collect screenshot rows only
+    ; Newest-first by uid (pages are newest-first, but sort explicitly so最新截图绝不会被误删)
     images := []
     n := 0
     for name in pages {
@@ -12692,6 +13144,27 @@ PruneOldScreenshots(*) {
             images.Push(c)
             if Mod(++n, 64) = 0
                 Sleep(-1)
+        }
+    }
+    ; uid 越大越新；固定项跳过计数
+    if images.Length > 1 {
+        sorted := []
+        loop images.Length
+            sorted.Push(images[A_Index])
+        ; simple insertion by uid desc (N is capped by MAX_SCREENSHOTS*few)
+        images := []
+        for c in sorted {
+            uid := Integer(c.uid)
+            inserted := false
+            loop images.Length {
+                if uid > Integer(images[A_Index].uid) {
+                    images.InsertAt(A_Index, c)
+                    inserted := true
+                    break
+                }
+            }
+            if !inserted
+                images.Push(c)
         }
     }
     drop := Map()
@@ -12938,7 +13411,7 @@ ApplyPendingView(*) {
 
 SetView(tab := "all", query := "", today := "0") {
     global clips, viewTab, viewQuery, viewToday, viewTotal, VIEW_PAGE_SIZE, FIRST_PAINT_SIZE, lastAppendCount, wvCore, viewCache
-        , qqSearchOn, qqQuery, qqAwaitKeyword, viewSwitchGuardUntil, viewApplyGen, viewApplying
+        , qqSearchOn, qqQuery, qqAwaitKeyword, qqEmojiMode, viewSwitchGuardUntil, viewApplyGen, viewApplying
     ; ?? 搜索进行中：禁止空查询把结果冲成「全部未过滤」，否则前端按关键字一滤就变成 0 条
     if qqSearchOn {
         want := Trim(String(qqQuery))
@@ -12957,6 +13430,33 @@ SetView(tab := "all", query := "", today := "0") {
         newTab := "all"
     newQuery := String(query)
     newToday := (String(today) = "1" || String(today) = "true")
+    ; ??? 表情：不走剪贴板磁盘索引，按拼音命中 emoji.txt
+    if qqSearchOn && qqEmojiMode && Trim(newQuery) != "" {
+        viewSwitchGuardUntil := A_TickCount + 200
+        myGen := ++viewApplyGen
+        viewApplying := true
+        viewTab := newTab
+        viewQuery := newQuery
+        viewToday := newToday
+        lastAppendCount := 0
+        try {
+            page := QueryEmojiHits(viewQuery, 0, VIEW_PAGE_SIZE)
+            if myGen != viewApplyGen
+                return
+            clips := page.items
+            viewTotal := page.total
+            ClipLog("SetView emoji q=" viewQuery " n=" clips.Length " total=" viewTotal)
+            viewApplying := false
+            if IsObject(wvCore)
+                PushClips(false)
+            QQSyncPanelVisibility()
+            viewSwitchGuardUntil := A_TickCount + 120
+        } finally {
+            if myGen = viewApplyGen
+                viewApplying := false
+        }
+        return
+    }
     ; 「最近」纯内存：短守卫，不走整盘扫
     if newTab = "recent" {
         viewSwitchGuardUntil := A_TickCount + 200
@@ -13064,7 +13564,11 @@ FilterClipsInPlaceToQuery(*) {
 }
 
 LoadMoreView(*) {
-    global clips, viewTab, viewQuery, viewToday, viewTotal, VIEW_PAGE_SIZE, lastAppendCount, wvCore
+    global clips, viewTab, viewQuery, viewToday, viewTotal, VIEW_PAGE_SIZE, lastAppendCount, wvCore, qqEmojiMode
+    if qqEmojiMode {
+        LoadMoreEmojiHits()
+        return
+    }
     if clips.Length >= viewTotal {
         lastAppendCount := 0
         if IsObject(wvCore)
@@ -13218,7 +13722,7 @@ ClipLog("LoadRecentFolders n=" (IsObject(recentFolders) ? recentFolders.Length :
 ; Warm「最近」cache immediately —do not wait for full-disk PreloadAllViews
 try CacheRecentFoldersView(false)
 try CacheRecentFoldersView(true)
-SetTimer(WatchExplorerFolder, 700)
+; 「最近文件夹」：仅记录资源管理器里双击进入的目录（无后台定时 COM）
 ; One-shot: trim historical screenshots over the cap (file images untouched)
 SetTimer(() => PreloadAllViews("0", false), -1)
 
@@ -13556,25 +14060,26 @@ $^+c:: {
 }
 
 ; Ctrl+左键：开 1.5s 窗口，等网页异步写入剪贴板（此时 Ctrl 往往已松开）
+; 顺带：资源管理器双击 → 若进入新文件夹则记入「最近」
 ~*LButton:: {
     global ctrlMouseCopyUntil
     if GetKeyState("Ctrl", "P") && !GetKeyState("Shift", "P") && !GetKeyState("Alt", "P")
         ctrlMouseCopyUntil := A_TickCount + 1500
+    NoteExplorerFolderDblClick()
 }
 
 ; Queue on: Ctrl+V = FIFO paste. Queue off: let OS / 快捷键4 handle Ctrl+V.
 #HotIf PasteQueueModeActive()
 $^v:: {
     global queueFifoPasteding, pasteSending, queueFifoPasteAt
-    ; Only block while a paste is actually running (was 280ms after-start → ate next Ctrl+V)
     if queueFifoPasteding
         return
-    ; Ignore keyboard auto-repeat only
     if (A_TickCount - queueFifoPasteAt) < 70
         return
     if pasteSending && (A_TickCount - queueFifoPasteAt) < 50
         return
-    PasteQueueFifo()
+    ; 热键返回后再粘贴：避免在物理 Ctrl+V 未结束时注入，也不会 KeyWait 变慢
+    SetTimer(PasteQueueFifo, -1)
 }
 #HotIf
 
@@ -13590,7 +14095,7 @@ $^+v:: {
             return
         if pasteSending && (A_TickCount - queueFifoPasteAt) < 50
             return
-        PasteQueueFifo(true)
+        SetTimer(() => PasteQueueFifo(true), -1)
         return
     }
     if !ShiftVLegacyTarget()
@@ -14378,13 +14883,24 @@ PasteQueueFifo(useLegacy := false) {
             ShowQueueTip("队列 粘贴失败", "", 800)
             return
         }
-        target := ResolvePasteTargetWin()
-        if !target {
-            try target := WinExist("A")
-        }
-        if target
-            DllCall("SetForegroundWindow", "Ptr", target)
-        ; Paste ASAP — mark/tip/save after (old order felt like dead Ctrl+V)
+        ; 队列 Ctrl+V：人已经在编辑器里，优先用当前前台窗。
+        ; 勿盲目 ForceActivate(lastGoodActiveWin)——面板关着时该值常过期，会把 ^v 打到别的窗口，只剩 tip。
+        cur := 0
+        try cur := WinGetID("A")
+        target := 0
+        if cur
+            && !(IsObject(guiWin) && guiWin.Hwnd && cur = guiWin.Hwnd)
+            && !IsWindowOwnedByPanel(cur)
+            && !IsShellOverlayHwnd(cur)
+            && !IsScreenshotHelperHwnd(cur)
+            target := cur
+        else
+            target := ResolvePasteTargetWin()
+        if !target
+            target := cur
+        if target && target != cur
+            ForceActivateHwnd(target)
+        Sleep 25
         if useLegacy && ShiftVLegacyTarget() {
             if WinActive("ahk_exe dbeaver.exe") || WinActive("ahk_exe datagrip64.exe")
                 didLegacy := LegacyDbeaverShiftV()
@@ -14393,6 +14909,9 @@ PasteQueueFifo(useLegacy := false) {
         }
         if !didLegacy
             TriggerPasteKey()
+        fgAfter := 0
+        try fgAfter := WinGetID("A")
+        ClipLog("PasteQueueFifo paste uid=" uid " type=" item.type " cur=" cur " target=" target " fg=" fgAfter)
         pasteQueueIds.RemoveAt(1)
         pasteQueueDone += 1
         pastedOk := true
@@ -14578,11 +15097,16 @@ ClipLogHeartbeat(*) {
 
 WriteHtmlFile() {
     global HTML_FILE, HTML_B64, CLIP_V1_DIR, UI_CACHE_VER
-    ; 未变更则跳过写入，避免 mtime 变了导致 WebView 每次冷加载 ~2s
+    ver := UiCacheVer()
+    ; 开发态优先用脚本旁解码 HTML，改 UI 不用重编整段 base64
+    decoded := A_ScriptDir "\_clip_ui_decoded.html"
+    srcText := ""
+    if FileExist(decoded) {
+        try srcText := FileRead(decoded, "UTF-8")
+    }
     if FileExist(HTML_FILE) {
         try {
             existing := FileRead(HTML_FILE, "UTF-8")
-            ver := UiCacheVer()
             if ver != "" && InStr(existing, 'data-ui-ver="' ver '"') {
                 ClipLog("WriteHtmlFile SKIP unchanged ver=" ver)
                 return
@@ -14590,8 +15114,16 @@ WriteHtmlFile() {
         } catch {
         }
     }
+    try DirCreate(CLIP_V1_DIR)
+    if srcText != "" {
+        if ver != "" && !InStr(srcText, 'data-ui-ver="' ver '"')
+            srcText := RegExReplace(srcText, 'data-ui-ver="[^"]*"', 'data-ui-ver="' ver '"', &_, 1)
+        AtomicWriteText(HTML_FILE, srcText)
+        ClipLog("WriteHtmlFile from decoded -> " HTML_FILE " ver=" ver)
+        return
+    }
     B64DecodeToFile(HTML_B64, HTML_FILE)
-    ClipLog("WriteHtmlFile -> " HTML_FILE " ver=" UiCacheVer())
+    ClipLog("WriteHtmlFile -> " HTML_FILE " ver=" ver)
 }
 
 ; =================================================
@@ -14870,20 +15402,61 @@ RecordRecentFolder(path) {
     return true
 }
 
-WatchExplorerFolder(*) {
-    global lastExplorerFolder
-    try {
-        if !(WinActive("ahk_class CabinetWClass") || WinActive("ahk_class ExploreWClass"))
-            return
-        p := GetActiveFolderPath()
-        if p = ""
-            return
-        p := NormalizeFolderPath(p)
-        if p = "" || p = lastExplorerFolder
-            return
-        lastExplorerFolder := p
-        RecordRecentFolder(p)
+IsExplorerOrDesktopFront(*) {
+    if WinActive("ahk_class CabinetWClass") || WinActive("ahk_class ExploreWClass")
+        return true
+    if WinActive("ahk_class WorkerW") || WinActive("ahk_class Progman")
+        return true
+    return false
+}
+
+; 资源管理器/桌面：检测到双击后，等导航完成；路径变了 = 双击进了文件夹 → 记历史
+NoteExplorerFolderDblClick(*) {
+    static lastTick := 0, lastX := -99999, lastY := -99999
+    if !IsExplorerOrDesktopFront()
+        return
+    CoordMode "Mouse", "Screen"
+    MouseGetPos(&x, &y)
+    now := A_TickCount
+    dblMs := 500
+    try dblMs := Integer(DllCall("GetDoubleClickTime", "UInt"))
+    if dblMs < 200
+        dblMs := 500
+    if (now - lastTick) <= dblMs && Abs(x - lastX) <= 6 && Abs(y - lastY) <= 6 {
+        lastTick := 0
+        lastX := -99999
+        lastY := -99999
+        before := ""
+        try before := NormalizeFolderPath(GetActiveFolderPath())
+        ; 导航后重试：导航有时慢于双击回调
+        SetTimer(TryRecordExplorerDblNav.Bind(before, 1), -180)
+        return
     }
+    lastTick := now
+    lastX := x
+    lastY := y
+}
+
+TryRecordExplorerDblNav(beforePath, attempt := 1) {
+    global lastExplorerFolder
+    beforePath := NormalizeFolderPath(beforePath)
+    after := ""
+    try after := NormalizeFolderPath(GetActiveFolderPath())
+    if after != "" && after != beforePath {
+        if after = lastExplorerFolder
+            return
+        lastExplorerFolder := after
+        RecordRecentFolder(after)
+        ClipLog("ExplorerDblClick folder=" after)
+        return
+    }
+    if Integer(attempt) < 4
+        SetTimer(TryRecordExplorerDblNav.Bind(beforePath, Integer(attempt) + 1), -220)
+}
+
+; 兼容旧名（若别处误调）：不再用于 Tab/面板打开
+CaptureActiveExplorerFolder(*) {
+    return false
 }
 
 QueryRecentFoldersPage(query, todayOnly, offset, limit) {

@@ -22,3 +22,6 @@ MouseIsOver(winTitle) {
     return WinExist(winTitle " ahk_id " winHandle)
 }
 
+#HotIf  恢复全局
+
+
