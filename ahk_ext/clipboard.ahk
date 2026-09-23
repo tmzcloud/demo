@@ -8412,17 +8412,14 @@ PasteItem(uid) {
     itemType := StrLower(String(item.type))
     isEmoji := (itemType = "emoji")
 
-    ; 先停输入钩子，避免退格/粘贴被钩子吃掉；搜索态只 SoftHide，少扰动目标窗
+    ; 先停输入钩子，避免退格/粘贴被钩子吃掉
     if IsObject(qqIh) {
         try qqIh.Stop()
         qqIh := 0
     }
-    if !uiPinned {
-        if wasQQ
-            SoftHidePanel()
-        else
-            HidePanel()
-    }
+    ; 粘贴一律 SoftHide：HidePanel 会先 Opt 改样式再藏，面板会闪一下
+    if !uiPinned
+        SoftHidePanel()
 
     clipIgnore := true
     try {
@@ -8463,16 +8460,23 @@ PasteItem(uid) {
             MarkItemsPasted([item.uid])
 
         target := ResolvePasteTargetWin()
-        if target
+        cur := 0
+        try cur := WinGetID("A")
+        ; SoftHide 后系统常已把焦点还回编辑器；再 ForceActivate 会闪标题栏
+        if target && cur && target != cur
             ForceActivateHwnd(target)
-        Sleep 50
+        else if !target && cur
+            target := cur
+        Sleep 15
         QQEraseTypedInEditor(eraseN)
-        Sleep 20
+        if eraseN > 0
+            Sleep 15
         TriggerPasteKey()
         ClipLog("PasteItem ok uid=" uid " type=" itemType " erase=" eraseN " qq=" (wasQQ ? 1 : 0))
     } finally {
+        ; 延后清搜索态，避免粘贴当帧再 SoftHide / 改 UI 造成二次闪
         if wasQQ
-            QQAbortSearch()
+            SetTimer(QQAbortSearch, -150)
         SetTimer(() => (clipIgnore := false), -500)
         if uiPinned
             SetTimer(RaiseClipboardPanel, -50)
