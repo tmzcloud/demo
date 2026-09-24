@@ -1149,12 +1149,22 @@ EnsureEmbeddedHtml() {
             if IsObject(f)
                 f.Close()
             if InStr(sample, "local_search_ui:") && InStr(sample, "--ring: #e42079") {
-                if ship != HTML_FILE
-                    FileCopy(ship, HTML_FILE, 1)
-                AppLog("EnsureEmbeddedHtml ship sync " HTML_FILE)
-            return
+                ; 截断的旧 ship 没有 uiReady，绿圈会卡死在「磁盘索引中」
+                fullOk := false
+                try {
+                    probe := FileRead(ship, "UTF-8")
+                    fullOk := InStr(probe, "post('uiReady|") || InStr(probe, 'post("uiReady|')
+                }
+                if !fullOk {
+                    AppLog("EnsureEmbeddedHtml ship truncated (no uiReady) → skip " ship)
+                } else {
+                    if ship != HTML_FILE
+                        FileCopy(ship, HTML_FILE, 1)
+                    AppLog("EnsureEmbeddedHtml ship sync " HTML_FILE)
+                    return
+                }
+            }
         }
-    }
     }
     ; 已有且版本匹配才跳过；旧黄圈 / 旧闪屏逻辑要强制覆盖（HELPME 数据目录常残留旧文件）
     if FileExist(HTML_FILE) {
@@ -1166,10 +1176,17 @@ EnsureEmbeddedHtml() {
                 if IsObject(f)
                     f.Close()
                 if InStr(sample, "local_search_ui:") && InStr(sample, "--ring: #e42079") {
-                    AppLog("EnsureEmbeddedHtml reuse " HTML_FILE)
-                    return
+                    reuseOk := false
+                    try {
+                        probe := FileRead(HTML_FILE, "UTF-8")
+                        reuseOk := InStr(probe, "post('uiReady|") || InStr(probe, 'post("uiReady|')
+                    }
+                    if reuseOk {
+                        AppLog("EnsureEmbeddedHtml reuse " HTML_FILE)
+                        return
+                    }
+                    AppLog("EnsureEmbeddedHtml reuse truncated (no uiReady) → rewrite")
                 }
-                AppLog("EnsureEmbeddedHtml stale → rewrite " HTML_FILE)
             }
         }
     }
