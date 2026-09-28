@@ -15318,6 +15318,23 @@ SaveRecentFolders(*) {
     try {
         if !DirExist(CLIP_V1_DIR)
             DirCreate CLIP_V1_DIR
+        ; 条数明显变少时先留 .bak，避免误点「清空」后无法找回
+        try {
+            if FileExist(RECENT_FOLDERS_FILE) {
+                oldN := 0
+                oldRaw := FileRead(RECENT_FOLDERS_FILE, "UTF-8")
+                pos0 := 1
+                while RegExMatch(oldRaw, '\{[^{}]*\}', &om, pos0) {
+                    oldN += 1
+                    pos0 := om.Pos + om.Len
+                    if oldN > 40
+                        break
+                }
+                newN := IsObject(recentFolders) ? recentFolders.Length : 0
+                if oldN >= 3 && newN < oldN
+                    FileCopy(RECENT_FOLDERS_FILE, RECENT_FOLDERS_FILE ".bak", 1)
+            }
+        }
         out := "["
         first := true
         if IsObject(recentFolders) {
@@ -15344,6 +15361,7 @@ SaveRecentFolders(*) {
         if FileExist(RECENT_FOLDERS_FILE)
             try FileDelete RECENT_FOLDERS_FILE
         FileMove tmp, RECENT_FOLDERS_FILE
+        ClipLog("SaveRecentFolders n=" (IsObject(recentFolders) ? recentFolders.Length : 0))
     } catch as e {
         ClipLogErr("SaveRecentFolders", e)
     }
@@ -15496,6 +15514,7 @@ QueryRecentFoldersPage(query, todayOnly, offset, limit) {
 
 ClearRecentFolders(*) {
     global recentFolders
+    before := IsObject(recentFolders) ? recentFolders.Length : 0
     kept := []
     if IsObject(recentFolders) {
         for c in recentFolders {
@@ -15503,6 +15522,7 @@ ClearRecentFolders(*) {
                 kept.Push(c)
         }
     }
+    ClipLog("ClearRecentFolders before=" before " kept=" kept.Length)
     recentFolders := kept
     SaveRecentFolders()
 }
