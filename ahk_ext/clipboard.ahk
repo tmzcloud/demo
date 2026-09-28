@@ -721,7 +721,7 @@ STORE_HOST   := "clips.store"
 ; 禁止用 *.local —— Windows mDNS 会卡 ~2–3s（与 HTML 大小无关）
 APP_HOST     := "clipui.app"
 ; Navigate cache key —固定版本；禁止每次启动用 mtime/A_Now 逼全量重载
-UI_CACHE_VER := "20260922-emoji-enter"
+UI_CACHE_VER := "20260928-emoji-norm"
 DEBUG_LOG    := CLIP_V1_DIR "\debug.log"
 ERROR_LOG    := CLIP_V1_DIR "\error.log"
 QUEUE_STATE_FILE := CLIP_V1_DIR "\paste_queue.json"
@@ -7016,7 +7016,7 @@ OnUiNavigationCompleted(core, args) {
 UiCacheVer(*) {
     global UI_CACHE_VER
     if UI_CACHE_VER = ""
-        UI_CACHE_VER := "20260922-emoji-enter"
+        UI_CACHE_VER := "20260928-emoji-norm"
     return UI_CACHE_VER
 }
 

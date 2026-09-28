@@ -6057,16 +6057,41 @@ B64DecodeToUtf8Text(b64) {
     return StrGet(buf, size, "UTF-8")
 }
 
+; UTF-8 文本 → Base64（无换行）。配置含 emoji 时避免 ExecuteScript 直接塞 Unicode 丢字形
+B64EncodeUtf8Text(s) {
+    s := String(s ?? "")
+    if s = ""
+        return ""
+    n := StrPut(s, "UTF-8")
+    if n < 2
+        return ""
+    buf := Buffer(n)
+    StrPut(s, buf, "UTF-8")
+    nbytes := n - 1
+    cch := 0
+    if !DllCall("crypt32\CryptBinaryToStringW", "Ptr", buf, "UInt", nbytes, "UInt", 0x40000001, "Ptr", 0, "UInt*", &cch)
+        return ""
+    wbuf := Buffer(cch * 2, 0)
+    if !DllCall("crypt32\CryptBinaryToStringW", "Ptr", buf, "UInt", nbytes, "UInt", 0x40000001, "Ptr", wbuf, "UInt*", &cch)
+        return ""
+    return RegExReplace(StrGet(wbuf, "UTF-16"), "[\r\n\s]+")
+}
+
 EmitAhkConfigResult(name, ok, msg := "", text := "", path := "") {
     global wvCore
     if !IsObject(wvCore)
         return
     if path = "" && name != ""
         path := AhkConfigPath(name)
+    ; 正文走 textB64，避免 WebView ExecuteScript 对 emoji 代理对损坏（格子空白像没缩略图）
+    textB64 := ""
+    if text != ""
+        textB64 := B64EncodeUtf8Text(text)
     payload := '{"name":' JStr(name)
         . ',"ok":' (ok ? "true" : "false")
         . ',"message":' JStr(msg)
-        . ',"text":' JStr(text)
+        . ',"text":""'
+        . ',"textB64":' JStr(textB64)
         . ',"path":' JStr(path)
         . "}"
     js := "try{window.__setAhkConfig&&window.__setAhkConfig(" payload ")}catch(e){}"
