@@ -721,7 +721,7 @@ STORE_HOST   := "clips.store"
 ; 禁止用 *.local —— Windows mDNS 会卡 ~2–3s（与 HTML 大小无关）
 APP_HOST     := "clipui.app"
 ; Navigate cache key —固定版本；禁止每次启动用 mtime/A_Now 逼全量重载
-UI_CACHE_VER := "20260928-emoji-norm"
+UI_CACHE_VER := "20261008-all-fresh"
 DEBUG_LOG    := CLIP_V1_DIR "\debug.log"
 ERROR_LOG    := CLIP_V1_DIR "\error.log"
 QUEUE_STATE_FILE := CLIP_V1_DIR "\paste_queue.json"
@@ -5886,7 +5886,7 @@ RememberGoodActiveWin(*) {
         if IsShellOverlayHwnd(cur) || IsScreenshotHelperHwnd(cur)
             return
         lastGoodActiveWin := cur
-        prevActiveWin := cur
+            prevActiveWin := cur
     }
 }
 
@@ -7016,7 +7016,7 @@ OnUiNavigationCompleted(core, args) {
 UiCacheVer(*) {
     global UI_CACHE_VER
     if UI_CACHE_VER = ""
-        UI_CACHE_VER := "20260928-emoji-norm"
+        UI_CACHE_VER := "20261008-all-fresh"
     return UI_CACHE_VER
 }
 
@@ -8444,7 +8444,7 @@ PasteItem(uid) {
             }
             if textBody = "" {
                 ClipLog("PasteItem empty text uid=" uid " type=" itemType)
-                return
+            return
             }
             A_Clipboard := textBody
             ok := true
@@ -8457,7 +8457,7 @@ PasteItem(uid) {
         }
 
         if !isEmoji
-            MarkItemsPasted([item.uid])
+        MarkItemsPasted([item.uid])
 
         target := ResolvePasteTargetWin()
         cur := 0
@@ -8467,7 +8467,7 @@ PasteItem(uid) {
             ForceActivateHwnd(target)
         else if !target && cur
             target := cur
-        Sleep 15
+            Sleep 15
         QQEraseTypedInEditor(eraseN)
         if eraseN > 0
             Sleep 15
@@ -8523,8 +8523,8 @@ PasteMany(idsStr, sepToken := "") {
                 if it.type = "emoji"
                     parts.Push(String(it.HasProp("data") ? it.data : ""))
                 else {
-                    EnsureClipBodyLoaded(it)
-                    parts.Push(it.HasProp("data") ? String(it.data) : "")
+                EnsureClipBodyLoaded(it)
+                parts.Push(it.HasProp("data") ? String(it.data) : "")
                 }
             }
             joined := JoinClipPartsWithSep(parts, sepTok)
@@ -8538,7 +8538,7 @@ PasteMany(idsStr, sepToken := "") {
                 if wasQQ
                     SoftHidePanel()
                 else
-                    HidePanel()
+                HidePanel()
             }
             clipIgnore := true
             try {
@@ -12409,6 +12409,49 @@ ViewCacheKey(tab, query, todayOnly) {
     return StrLower(Trim(String(tab))) "`n" (todayOnly ? "1" : "0") "`n" String(query)
 }
 
+; 磁盘首页里该 tab 的最新 uid（只扫到第一条匹配，开销小）
+PeekDiskNewestUidForTab(tab, todayOnly) {
+    tab := StrLower(Trim(String(tab)))
+    todayOnly := !!todayOnly
+    try {
+        m := LoadManifest()
+        if !IsObject(m) || !m.Has("pages")
+            return 0
+        for name in m["pages"] {
+            path := PagePath(name)
+            if !FileExist(path)
+                continue
+            try {
+                loop read path, "UTF-8" {
+                    c := ParseNdjsonLineFast(A_LoopReadLine)
+                    if !IsObject(c)
+                        continue
+                    if !ItemMatchesTabToday(c, tab, todayOnly)
+                        continue
+                    return c.HasProp("uid") ? Integer(c.uid) : 0
+                }
+            } catch {
+            }
+        }
+    } catch {
+    }
+    return 0
+}
+
+; 缓存首条 uid 落后于磁盘 → 视为陈旧（「全部」卡在首屏快照的根因）
+ViewCacheIsStale(entry, tab, todayOnly) {
+    if !IsObject(entry) || !entry.HasProp("items") || entry.items.Length < 1
+        return true
+    head := entry.items[1]
+    cacheUid := (IsObject(head) && head.HasProp("uid")) ? Integer(head.uid) : 0
+    if cacheUid <= 0
+        return true
+    diskUid := PeekDiskNewestUidForTab(tab, todayOnly)
+    if diskUid <= 0
+        return false
+    return diskUid > cacheUid
+}
+
 InvalidateViewCache(*) {
     global viewCache, tabTotals, searchPools
     viewCache := Map()
@@ -12729,24 +12772,44 @@ MemoryRemoveUid(uid) {
     MemoryTakeUid(uid)
 }
 
+; 把新条目可靠补进已有 viewCache（尤其「全部」），避免只更新当前 text 缓存
+PatchViewCacheFront(item) {
+    global viewCache, VIEW_PAGE_SIZE, tabTotals
+    if !IsObject(item) || !item.HasProp("uid")
+        return
+    maxRows := Max(VIEW_PAGE_SIZE * 2, 40)
+    uid := Integer(item.uid)
+    for key, entry in viewCache {
+        if !IsObject(entry) || !entry.HasProp("items")
+            continue
+        tab := "", todayOnly := false, query := ""
+        ParseViewCacheKey(key, &tab, &todayOnly, &query)
+        if !ItemMatchesView(item, tab, query, todayOnly)
+            continue
+        ; 去掉同 uid 再插到队首
+        for i, c in entry.items {
+            if IsObject(c) && c.HasProp("uid") && Integer(c.uid) = uid {
+                entry.items.RemoveAt(i)
+                entry.total := Max(0, Integer(entry.total) - 1)
+                break
+            }
+        }
+        entry.items.InsertAt(1, item)
+        entry.total := Integer(entry.total) + 1
+        while entry.items.Length > maxRows
+            entry.items.Pop()
+        viewCache[key] := entry
+        if query = "" && IsObject(tabTotals)
+            tabTotals[key] := Integer(entry.total)
+    }
+}
+
 MemoryInsertFront(item) {
     global clips, viewTab, viewQuery, viewToday, viewTotal, viewCache, PAGE_SIZE, VIEW_PAGE_SIZE, tabTotals, searchPools
     ; Drop same uid anywhere first
     MemoryRemoveUid(item.uid)
     LiveFrontAdd(item)
-    maxRows := Max(VIEW_PAGE_SIZE * 2, 40)
-    for key, entry in viewCache {
-        tab := "", todayOnly := false, query := ""
-        ParseViewCacheKey(key, &tab, &todayOnly, &query)
-        if !ItemMatchesView(item, tab, query, todayOnly)
-            continue
-        entry.items.InsertAt(1, item)
-        entry.total += 1
-        while entry.items.Length > maxRows
-            entry.items.Pop()
-        if query = "" && IsObject(tabTotals)
-            tabTotals[key] := Integer(entry.total)
-    }
+    PatchViewCacheFront(item)
     if IsObject(searchPools) {
         h := ClipSearchHay(item)
         item._searchHay := h
@@ -13053,6 +13116,8 @@ PersistNewItem(item) {
     uidAfter := item.HasProp("uid") ? Integer(item.uid) : 0
     ClipLog("PersistNewItem done uid=" uidAfter " ok=" ok " qg=" keepQg " qi=" keepQi)
     if ok {
+        ; 落盘后再补一次缓存：防止 Invalidate/Preload 竞态把「全部」快照打回旧数据
+        try PatchViewCacheFront(item)
         LiveFrontConfirmPersisted(item.uid)
         if keepQg > 0 {
             ; Final uid after Inherit — meta must match disk row
@@ -13079,7 +13144,7 @@ ApplyImgFileLocal(uid, imgFile) {
             c.imgFile := imgFile
             ; 仅截图位图可清空 data（已落盘 imgFile）；file 类型的 data 是路径，清掉会导致「最新图片丢了」
             if c.type = "image"
-                c.data := ""
+            c.data := ""
             break
         }
     }
@@ -13090,7 +13155,7 @@ ApplyImgFileLocal(uid, imgFile) {
             if c.uid = uid {
                 c.imgFile := imgFile
                 if c.type = "image"
-                    c.data := ""
+                c.data := ""
                 break
             }
         }
@@ -13295,21 +13360,28 @@ PreloadAllViews(today := "", pushUi := true) {
         if viewCache.Has(key) {
             entry := viewCache[key]
             if IsObject(entry) && entry.HasProp("items") && entry.items.Length >= 1 {
-                PerfMark("PreloadAllViews viewCache HIT n=" entry.items.Length)
-                if !qqSearchOn {
-                    clips := []
-                    for c in entry.items
-                        clips.Push(c)
-                    viewTab := "all"
-                    viewQuery := ""
-                    viewToday := todayFlag
-                    viewTotal := Integer(entry.HasProp("total") ? entry.total : clips.Length)
-                    viewApplying := false
-                    if pushUi && IsObject(wvCore)
-                        PushClips(false)
+                ; 缓存落后于磁盘则丢弃，重新扫首页
+                if ViewCacheIsStale(entry, "all", todayFlag) {
+                    ClipLog("PreloadAllViews drop stale cache head")
+                    viewCache.Delete(key)
+                } else {
+                    PerfMark("PreloadAllViews viewCache HIT n=" entry.items.Length)
+                    if !qqSearchOn {
+                        clips := []
+                        for c in entry.items
+                            clips.Push(c)
+                        viewTab := "all"
+                        viewQuery := ""
+                        viewToday := todayFlag
+                        viewTotal := Integer(entry.HasProp("total") ? entry.total : clips.Length)
+                        viewApplying := false
+                        MergeLiveFrontIntoClips()
+                        if pushUi && IsObject(wvCore)
+                            PushClips(false)
+                    }
+                    CacheRecentFoldersView(todayFlag)
+                    return
                 }
-                CacheRecentFoldersView(todayFlag)
-                return
             }
         }
 
@@ -13513,7 +13585,12 @@ SetView(tab := "all", query := "", today := "0") {
                 && entry.items.Length < 5 && entry.total <= entry.items.Length
                 && (viewTab = "all" || viewTab = "image" || viewTab = "file"
                     || viewTab = "text" || viewTab = "link" || viewTab = "pinned")
-            thin := !IsObject(entry) || !entry.HasProp("items") || poisoned
+            ; 「全部/文本…」空搜索：磁盘已有更新条目则丢弃陈旧首屏快照
+            stale := viewQuery = ""
+                && (viewTab = "all" || viewTab = "text" || viewTab = "link"
+                    || viewTab = "image" || viewTab = "file" || viewTab = "pinned")
+                && ViewCacheIsStale(entry, viewTab, viewToday)
+            thin := !IsObject(entry) || !entry.HasProp("items") || poisoned || stale
             if !thin {
                 if myGen != viewApplyGen
                     return
@@ -13532,7 +13609,9 @@ SetView(tab := "all", query := "", today := "0") {
                 viewSwitchGuardUntil := A_TickCount + 400
                 return
             }
-            ClipLog("SetView drop thin cache tab=" viewTab " n=" entry.items.Length " total=" entry.total)
+            ClipLog("SetView drop " (stale ? "stale" : "thin") " cache tab=" viewTab
+                " n=" (IsObject(entry) && entry.HasProp("items") ? entry.items.Length : 0)
+                " total=" (IsObject(entry) && entry.HasProp("total") ? entry.total : 0))
             viewCache.Delete(key)
         }
         page := QueryDiskPage(viewTab, viewQuery, viewToday, 0
@@ -14899,7 +14978,7 @@ PasteQueueFifo(useLegacy := false) {
             && !IsScreenshotHelperHwnd(cur)
             target := cur
         else
-            target := ResolvePasteTargetWin()
+        target := ResolvePasteTargetWin()
         if !target
             target := cur
         if target && target != cur
@@ -15436,7 +15515,7 @@ IsExplorerOrDesktopFront(*) {
 NoteExplorerFolderDblClick(*) {
     static lastTick := 0, lastX := -99999, lastY := -99999
     if !IsExplorerOrDesktopFront()
-        return
+            return
     CoordMode "Mouse", "Screen"
     MouseGetPos(&x, &y)
     now := A_TickCount
@@ -15452,7 +15531,7 @@ NoteExplorerFolderDblClick(*) {
         try before := NormalizeFolderPath(GetActiveFolderPath())
         ; 导航后重试：导航有时慢于双击回调
         SetTimer(TryRecordExplorerDblNav.Bind(before, 1), -180)
-        return
+            return
     }
     lastTick := now
     lastX := x

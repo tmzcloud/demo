@@ -469,6 +469,8 @@ SetTimer(StartEverythingBootOnce, -1)
 SetTimer(EnsureEmbeddedHtmlSafe, -1)
 ; emoji.txt ↔ 脚本末尾 base64（异步，不挡主流程）
 SetTimer(SyncEmojiConfigPortable, -1)
+; 节假日 holiday-cn 异步预热（当年±1），不挡主流程
+SetTimer(WarmHolidayCache, -800)
 
 OnExternalShowMsg(*) {
     SetTimer(ShowWindow, -1)
@@ -762,7 +764,7 @@ OnGuiSize(*) {
         try wv.Fill()
 }
 
-; 上次关闭时的界面模式（file/handle/info/config），用于重开时跳过搜索转圈
+; 上次关闭时的界面模式（file/handle/info/config/calendar），用于重开时跳过搜索转圈
 ReadLastUiMode() {
     global SEARCH_DIR, lastUiMode
     f := SEARCH_DIR "\last_ui_mode.txt"
@@ -773,7 +775,7 @@ ReadLastUiMode() {
     }
     if mode = "" && IsSet(lastUiMode)
         mode := lastUiMode
-    if mode != "handle" && mode != "info" && mode != "config"
+    if mode != "handle" && mode != "info" && mode != "config" && mode != "calendar"
         mode := "file"
     return mode
 }
@@ -1137,9 +1139,30 @@ EnsureEmbeddedHtmlSafe(*) {
     }
 }
 
+; 同步 vendor（lunar.js）与 holiday_cn 种子到运行目录
+SyncLocalSearchAssets(*) {
+    global SEARCH_DIR
+    shipRoot := A_ScriptDir "\data\local_search"
+    if !DirExist(shipRoot)
+        return
+    for sub in ["vendor", "holiday_cn"] {
+        src := shipRoot "\" sub
+        dst := SEARCH_DIR "\" sub
+        if !DirExist(src)
+            continue
+        try DirCreate dst
+        try {
+            loop files src "\*.*", "F" {
+                try FileCopy(A_LoopFileFullPath, dst "\" A_LoopFileName, 1)
+            }
+        }
+    }
+}
+
 EnsureEmbeddedHtml() {
     global HTML_FILE, SEARCH_DIR, EMBED_HTML_TAG
     DirCreate SEARCH_DIR
+    try SyncLocalSearchAssets()
     ; 优先用脚本旁 data\local_search\index.html（开发改这里即可同步到 HELPME 运行目录）
     ship := A_ScriptDir "\data\local_search\index.html"
     if FileExist(ship) {
@@ -6098,6 +6121,226 @@ EmitAhkConfigResult(name, ok, msg := "", text := "", path := "") {
     try wvCore.ExecuteScriptAsync(js)
 }
 
+; NateScarlet/holiday-cn：本地缓存优先，缺失再拉 jsDelivr（唯一外网节假日源）
+HolidayCnDir() {
+    global SEARCH_DIR
+    dir := SEARCH_DIR "\holiday_cn"
+    try DirCreate dir
+    return dir
+}
+
+HolidayCnPath(year) {
+    return HolidayCnDir() "\" year ".json"
+}
+
+ReadHolidayCnFile(year) {
+    path := HolidayCnPath(year)
+    if !FileExist(path)
+        return ""
+    try {
+        raw := FileRead(path, "UTF-8")
+        if SubStr(Trim(raw), 1, 1) = "{"
+            return raw
+    } catch {
+    }
+    return ""
+}
+
+HolidayCnThisYear() {
+    return Integer(FormatTime(, "yyyy"))
+}
+
+; 磁盘只保留今年一份
+PruneHolidayCnExcept(keepYear) {
+    keepYear := Integer(keepYear)
+    keepName := keepYear ".json"
+    try {
+        loop files HolidayCnDir() "\*.json", "F" {
+            if A_LoopFileName != keepName
+                try FileDelete A_LoopFileFullPath
+        }
+    }
+}
+
+SaveHolidayCnFile(year, raw) {
+    raw := Trim(String(raw))
+    if raw = "" || SubStr(raw, 1, 1) != "{"
+        return false
+    ; 策略：只落盘「今年」；往年/明年拉到也不存
+    curY := HolidayCnThisYear()
+    if Integer(year) != curY
+        return false
+    path := HolidayCnPath(year)
+    tmp := path ".tmp"
+    try {
+        if FileExist(tmp)
+            FileDelete tmp
+        FileAppend raw, tmp, "UTF-8"
+        if FileExist(path)
+            FileDelete path
+        FileMove tmp, path, 1
+        PruneHolidayCnExcept(curY)
+        return true
+    } catch {
+        try {
+            if FileExist(path)
+                FileDelete path
+            FileAppend raw, path, "UTF-8"
+            PruneHolidayCnExcept(curY)
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
+; 拉网；成功且为今年则写入本地
+FetchHolidayCnRaw(year, &errMsg) {
+    errMsg := ""
+    urls := [
+        "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/" year ".json",
+        "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/" year ".json"
+    ]
+    for url in urls {
+        body := ""
+        status := 0
+        try {
+            whr := ComObject("WinHttp.WinHttpRequest.5.1")
+            whr.Open("GET", url, true)
+            whr.SetTimeouts(4000, 4000, 6000, 8000)
+            try whr.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            try whr.SetRequestHeader("Accept", "application/json,*/*")
+            whr.Send()
+            whr.WaitForResponse(10)
+            status := Integer(whr.Status)
+            body := String(whr.ResponseText)
+        } catch as e {
+            errMsg := e.Message
+            continue
+        }
+        if status = 200 && body != "" && SubStr(Trim(body), 1, 1) = "{" {
+            SaveHolidayCnFile(year, body)
+            return body
+        }
+        if errMsg = ""
+            errMsg := "http-" status
+    }
+    return ""
+}
+
+; 启动预热：只拉/刷新「今年」，失败则保留本地今年表
+WarmHolidayCache(*) {
+    y := HolidayCnThisYear()
+    AppLog("WarmHolidayCache begin y=" y " (only this year)")
+    try PruneHolidayCnExcept(y)
+    SetTimer(WarmHolidayYear.Bind(y), -200)
+}
+
+WarmHolidayYear(year) {
+    year := Integer(year)
+    curY := HolidayCnThisYear()
+    if year != curY
+        return
+    err := ""
+    raw := FetchHolidayCnRaw(year, &err)
+    if raw != "" {
+        AppLog("WarmHolidayYear " year " ok net")
+        return
+    }
+    if ReadHolidayCnFile(year) != ""
+        AppLog("WarmHolidayYear " year " keep local (net fail: " err ")")
+    else
+        AppLog("WarmHolidayYear " year " fail " err)
+}
+
+FetchHolidayYear(year := "") {
+    year := Trim(String(year))
+    if !RegExMatch(year, "^\d{4}$")
+        year := FormatTime(, "yyyy")
+    curY := HolidayCnThisYear()
+    errMsg := ""
+    fromCache := false
+    ; 1) 先拉外网 holiday-cn
+    body := FetchHolidayCnRaw(year, &errMsg)
+    ; 2) 拉不到：今年用本地落盘表兜底（只存今年）
+    if body = "" && Integer(year) = curY {
+        body := ReadHolidayCnFile(year)
+        fromCache := (body != "")
+        if fromCache
+            AppLog("FetchHolidayYear " year " fallback local")
+    }
+    if body != "" {
+        ; 回传 holiday-cn 原始 JSON，前端 calHolidayFromNate 解析（避免二次打包丢字段）
+        EmitHolidayYearRaw(year, true, fromCache ? "local" : "holiday-cn", body)
+        return
+    }
+    if errMsg = ""
+        errMsg := "holiday-cn-miss"
+    ; 空年也回传，前端用农历节日名兜底（不伪造休）
+    EmitHolidayYearRaw(year, true, errMsg, '{"year":' year ',"days":[]}')
+}
+
+; 将 NateScarlet holiday-cn 年 JSON 转成 timor {code,holiday} 结构
+HolidayCnToTimorJson(year, raw) {
+    raw := Trim(String(raw))
+    if raw = "" || SubStr(raw, 1, 1) != "{"
+        return ""
+    ; 粗解析 days 数组：找 "days":[ ... ]
+    if !RegExMatch(raw, 's)"days"\s*:\s*\[(.*)\]', &m)
+        return '{"code":0,"holiday":{}}'
+    daysBlob := m[1]
+    holidayParts := []
+    pos := 1
+    while RegExMatch(daysBlob, '\{[^{}]*\}', &obj, pos) {
+        chunk := obj[0]
+        date := ""
+        name := ""
+        isOff := 0
+        if RegExMatch(chunk, '"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"', &dm)
+            date := dm[1]
+        if RegExMatch(chunk, '"name"\s*:\s*"([^"]*)"', &nm)
+            name := nm[1]
+        if RegExMatch(chunk, '"isOffDay"\s*:\s*(true|false)', &om)
+            isOff := (om[1] = "true") ? 1 : 0
+        if date != "" && RegExMatch(date, '^' year '-(\d{2}-\d{2})$', &mdm) {
+            md := mdm[1]
+            hol := isOff ? "true" : "false"
+            nmEsc := StrReplace(StrReplace(name, "\", "\\"), '"', '\"')
+            if nmEsc = ""
+                nmEsc := isOff ? "放假" : "补班"
+            holidayParts.Push('"' md '":{"holiday":' hol ',"name":"' nmEsc '","date":"' date '"}')
+        }
+        pos := obj.Pos + obj.Len
+        if A_Index > 400
+            break
+    }
+    body := '{"code":0,"holiday":{'
+    if holidayParts.Length
+        body .= holidayParts[1]
+    loop holidayParts.Length - 1
+        body .= "," holidayParts[A_Index + 1]
+    body .= "}}"
+    return body
+}
+
+EmitHolidayYear(year, ok, msg := "", jsonBody := "") {
+    ; 兼容旧调用：jsonBody 视为已打包的 timor / 或原始 JSON
+    EmitHolidayYearRaw(year, ok, msg, jsonBody)
+}
+
+; 将 holiday-cn 原始年 JSON 注入 WebView（message=来源标记）
+EmitHolidayYearRaw(year, ok, msg := "", jsonBody := "") {
+    global wvCore
+    if !IsObject(wvCore)
+        return
+    if ok && jsonBody != ""
+        payload := '{"year":' year ',"ok":true,"message":' JStr(msg) ',"format":"holiday-cn","data":' jsonBody '}'
+    else
+        payload := '{"year":' year ',"ok":false,"message":' JStr(msg) ',"format":"holiday-cn","data":null}'
+    js := "try{window.__onHolidayYear&&window.__onHolidayYear(" payload ")}catch(e){}"
+    try wvCore.ExecuteScriptAsync(js)
+}
+
 ExpandAhkEnvPath(s) {
     s := String(s ?? "")
     if s = ""
@@ -6367,7 +6610,7 @@ DispatchUiMsg(msg) {
         uiMode := "file"
         if SubStr(msg, 1, 8) = "uiReady|"
             uiMode := Trim(SubStr(msg, 9))
-        if uiMode != "handle" && uiMode != "info" && uiMode != "config"
+        if uiMode != "handle" && uiMode != "info" && uiMode != "config" && uiMode != "calendar"
             uiMode := "file"
         lastUiMode := uiMode
         try FileOpen(SEARCH_DIR "\last_ui_mode.txt", "w", "UTF-8").Write(uiMode)
@@ -6414,7 +6657,7 @@ DispatchUiMsg(msg) {
     if SubStr(msg, 1, 12) = "sessionMode|" {
         global lastUiMode, SEARCH_DIR
         mode := Trim(SubStr(msg, 13))
-        if mode != "handle" && mode != "info" && mode != "config"
+        if mode != "handle" && mode != "info" && mode != "config" && mode != "calendar"
             mode := "file"
         lastUiMode := mode
         if mode != "file"
@@ -6467,6 +6710,11 @@ DispatchUiMsg(msg) {
         global sysInfoForce
         sysInfoForce := (SubStr(msg, 9) = "1")
         SetTimer(PushSysInfo, -1)
+        return
+    }
+    if SubStr(msg, 1, 12) = "holidayYear|" {
+        year := Trim(SubStr(msg, 13))
+        SetTimer(FetchHolidayYear.Bind(year), -1)
         return
     }
     if SubStr(msg, 1, 8) = "cfgIcon|" {
