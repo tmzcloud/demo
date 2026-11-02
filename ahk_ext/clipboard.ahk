@@ -721,14 +721,14 @@ STORE_HOST   := "clips.store"
 ; 禁止用 *.local —— Windows mDNS 会卡 ~2–3s（与 HTML 大小无关）
 APP_HOST     := "clipui.app"
 ; Navigate cache key —固定版本；禁止每次启动用 mtime/A_Now 逼全量重载
-UI_CACHE_VER := "20261008-all-fresh"
+UI_CACHE_VER := "20261013-no-emoji-btn"
 DEBUG_LOG    := CLIP_V1_DIR "\debug.log"
 ERROR_LOG    := CLIP_V1_DIR "\error.log"
 QUEUE_STATE_FILE := CLIP_V1_DIR "\paste_queue.json"
 QUEUE_META_FILE  := CLIP_V1_DIR "\queue_meta.tsv"   ; uid -> group/index (sync, survives restart)
 RECENT_FOLDERS_FILE := CLIP_V1_DIR "\recent_folders.json"
 MAX_RECENT_FOLDERS := 20
-; HELPME_HOME set →%HELPME_HOME%\command_ext\ahk_ext\data\clip_v1
+; HELPME_HOME set →%HELPME_HOME%\ahk_ext\data\clip_v1
 ; otherwise →%A_ScriptDir%\data\clip_v1
 ; 兼容旧路径 ahk\clip_v1：新目录空时一次性迁入
 ResolveAhkExtDataRoot() {
@@ -737,7 +737,7 @@ ResolveAhkExtDataRoot() {
     home := Trim(String(home))
     if home != "" {
         home := RTrim(home, "\/")
-        dir := home "\command_ext\ahk_ext\data"
+        dir := home "\ahk_ext\data"
         try DirCreate dir
         return dir
     }
@@ -755,7 +755,7 @@ ResolveClipV1Dir() {
     try home := EnvGet("HELPME_HOME")
     home := Trim(String(home))
     if home != ""
-        legacy := RTrim(home, "\/") "\command_ext\ahk_ext\ahk\clip_v1"
+        legacy := RTrim(home, "\/") "\ahk_ext\ahk\clip_v1"
     else
         legacy := A_ScriptDir "\ahk\clip_v1"
     MigrateLegacyDataDir(legacy, dir)
@@ -6588,7 +6588,7 @@ EmojiConfigPath() {
     home := ""
     try home := Trim(EnvGet("HELPME_HOME"))
     if home != "" {
-        p := RTrim(home, "\/") "\command_ext\ahk\config\emoji.txt"
+        p := RTrim(home, "\/") "\ahk\config\emoji.txt"
         if FileExist(p)
             return p
     }
@@ -7016,7 +7016,7 @@ OnUiNavigationCompleted(core, args) {
 UiCacheVer(*) {
     global UI_CACHE_VER
     if UI_CACHE_VER = ""
-        UI_CACHE_VER := "20261008-all-fresh"
+        UI_CACHE_VER := "20261013-no-emoji-btn"
     return UI_CACHE_VER
 }
 
@@ -13365,22 +13365,22 @@ PreloadAllViews(today := "", pushUi := true) {
                     ClipLog("PreloadAllViews drop stale cache head")
                     viewCache.Delete(key)
                 } else {
-                    PerfMark("PreloadAllViews viewCache HIT n=" entry.items.Length)
-                    if !qqSearchOn {
-                        clips := []
-                        for c in entry.items
-                            clips.Push(c)
-                        viewTab := "all"
-                        viewQuery := ""
-                        viewToday := todayFlag
-                        viewTotal := Integer(entry.HasProp("total") ? entry.total : clips.Length)
-                        viewApplying := false
+                PerfMark("PreloadAllViews viewCache HIT n=" entry.items.Length)
+                if !qqSearchOn {
+                    clips := []
+                    for c in entry.items
+                        clips.Push(c)
+                    viewTab := "all"
+                    viewQuery := ""
+                    viewToday := todayFlag
+                    viewTotal := Integer(entry.HasProp("total") ? entry.total : clips.Length)
+                    viewApplying := false
                         MergeLiveFrontIntoClips()
-                        if pushUi && IsObject(wvCore)
-                            PushClips(false)
-                    }
-                    CacheRecentFoldersView(todayFlag)
-                    return
+                    if pushUi && IsObject(wvCore)
+                        PushClips(false)
+                }
+                CacheRecentFoldersView(todayFlag)
+                return
                 }
             }
         }

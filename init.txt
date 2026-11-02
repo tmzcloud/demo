@@ -22,7 +22,7 @@ Write-Host "   -> $targetDrive" -ForegroundColor White
 # ==============================================================================
 Write-Host "2. Create directories" -ForegroundColor Cyan
 
-$baseDir    = Join-Path $targetDrive "helpme\command_ext"
+$baseDir    = Join-Path $targetDrive "helpme"
 $ahkDir     = Join-Path $baseDir "ahk"
 $installDir = Join-Path $ahkDir "ahk_install2"
 
