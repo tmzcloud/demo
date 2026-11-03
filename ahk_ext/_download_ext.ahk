@@ -1,4 +1,4 @@
-; 下载页：aria2c + 用户自设 Git 镜像 / 保存目录
+﻿; 下载页：aria2c + 用户自设 Git 镜像 / 保存目录
 #Requires AutoHotkey v2.0
 
 global DL_JOBS := Map()

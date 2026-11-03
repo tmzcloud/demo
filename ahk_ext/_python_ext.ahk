@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 #NoTrayIcon
 ; _python_ext.ahk — 按需启动（快捷键4 跳过 _ 开头脚本）；无托盘图标
