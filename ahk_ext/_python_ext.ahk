@@ -303,7 +303,7 @@ DefaultDeployPipeJson() {
         . '"https://huggingface.co/ZhengPeng7/BiRefNet/resolve/main/model.safetensors"'
         . ']},'
         . '"pip":{"label":"pip 依赖","title":"BiRefNet 推理依赖","size":"~100-200 MB","local":"python\\Lib\\site-packages","packages":['
-        . '"typing_extensions","transformers==4.46.3","timm","einops","pillow","scipy","kornia"'
+        . '"typing_extensions","transformers==4.46.3","accelerate>=0.26.0","timm","einops","pillow","scipy","kornia"'
         . ']},'
         . '"script":{"label":"脚本","title":"remove_bg.py","size":"BiRefNet CLI","local":"script\\remove_bg.py","kind":"script","note":"可编辑脚本，保存后双向同步"}'
         . '}}'
@@ -689,9 +689,18 @@ Aria2Download(aria2c, destFile, urls, minBytes := 100000, connections := 8, resu
             } catch {
             }
         }
-        ; -c 续传；大文件加长 timeout
-        cmd := Format('"{1}" -c -x {2} -s {2} -k 1M --connect-timeout=20 --timeout=300 --max-tries=5 --allow-overwrite=true --auto-file-renaming=false --check-certificate=false --user-agent="Mozilla/5.0" --show-console-readout=false --summary-interval=1 --console-log-level=notice -d "{3}" -o "{4}" "{5}"'
-            , aria2c, conn, outDir, outName, url)
+        ; -c 续传；浏览器头降低限速；大文件加长 timeout
+        ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        hdr := ' --user-agent="' ua '"'
+            . ' --header="Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"'
+            . ' --header="Accept-Language: zh-CN,zh;q=0.9,en;q=0.8"'
+            . ' --header="Sec-Fetch-Dest: document"'
+            . ' --header="Sec-Fetch-Mode: navigate"'
+            . ' --header="Sec-Fetch-Site: none"'
+            . ' --header="Upgrade-Insecure-Requests: 1"'
+            . ' --referer="' url '"'
+        cmd := Format('"{1}" -c -x {2} -s {2} -k 1M --max-connection-per-server={2} --connect-timeout=20 --timeout=300 --max-tries=5 --allow-overwrite=true --auto-file-renaming=false --check-certificate=false{6} --show-console-readout=false --summary-interval=1 --console-log-level=notice -d "{3}" -o "{4}" "{5}"'
+            , aria2c, conn, outDir, outName, url, hdr)
         srcHint := urls.Length > 1 ? ("[" idx "/" urls.Length "]") : ""
         exitCode := Aria2RunWithProgress(cmd, outDir, destFile, minBytes, tipName, srcHint)
         if FileExist(destFile) {
@@ -1312,7 +1321,7 @@ EnsureBiRefNetDeps(targetDir) {
     chkLog := modelDir "\biref_deps_probe.out.log"
     pkgList := CfgStepList("pip", "packages")
     if pkgList.Length < 1
-        pkgList := ["typing_extensions", "transformers==4.46.3", "timm", "einops", "pillow", "scipy", "kornia"]
+        pkgList := ["typing_extensions", "transformers==4.46.3", "accelerate>=0.26.0", "timm", "einops", "pillow", "scipy", "kornia"]
     ; 旧配置缺 typing_extensions 时补上（torch/transformers 硬依赖）
     hasTe := false
     for p in pkgList {

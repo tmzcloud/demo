@@ -509,8 +509,9 @@ for a in A_Args {
 }
 if !showWhenReady && dashboardStandalone
     showWhenReady := true
-; 0x8001：外部（快捷键4 托盘双击）唤出
+; 0x8001：外部唤出；0x8002：外部隐藏（Alt+空格开关）
 OnMessage(0x8001, OnExternalShowMsg)
+OnMessage(0x8002, OnExternalHideMsg)
 ; Hotkey: Win+Shift+F 打开/聚焦本地搜索
 #+f::ShowWindow()
 ; Esc：视频全屏时只退出全屏；否则隐藏窗口。Ctrl+F 定位搜索框
@@ -519,8 +520,9 @@ Esc::HandleEscKey()
 ^f::FocusSearchBox()
 #HotIf
 ; 独立运行：立刻弹窗（优先于写 HTML / 下 Everything），避免第一次点击无界面
-; 快捷键4 写 show.request 时唤出（比 PostMessage 更稳）
+; 快捷键4 写 show.request / hide.request 时唤出或隐藏（比 PostMessage 更稳）
 SetTimer(PollShowRequest, 250)
+SetTimer(PollHideRequest, 250)
 if showWhenReady
     SetTimer(ShowWindow, -1)
 ; Everything 与界面并行启动，不再等 WebView uiReady（明显加快首次可用）
@@ -537,6 +539,24 @@ OnExternalShowMsg(*) {
     return 0
 }
 
+OnExternalHideMsg(*) {
+    SetTimer(HideWindow, -1)
+    return 0
+}
+
+PollHideRequest(*) {
+    global SEARCH_DIR
+    req := SEARCH_DIR "\hide.request"
+    if !FileExist(req)
+        return
+    try FileDelete(req)
+    catch {
+        return
+    }
+    AppLog("PollHideRequest → HideWindow")
+    SetTimer(HideWindow, -1)
+}
+
 PollShowRequest(*) {
     global SEARCH_DIR
     req := SEARCH_DIR "\show.request"
@@ -547,6 +567,7 @@ PollShowRequest(*) {
     AppLog("PollShowRequest → ShowWindow")
     SetTimer(ShowWindow, -1)
         }
+
     }
     ; 调试/脚本：写 dep.request（内容如 ripgrep）触发主页依赖安装
     depReq := SEARCH_DIR "\dep.request"
@@ -563,6 +584,8 @@ PollShowRequest(*) {
             SetTimer(EnsureHomeSearchDep.Bind(id), -1)
         }
     }
+    ; 打开本地路径：WebView 队列回调里 SetTimer/Run 常无窗；与 show.request 同路径主线程轮询
+    try PollOpenPathRequest()
 }
 
 FocusSearchBox(*) {
@@ -985,16 +1008,19 @@ OnDashboardClose(*) {
 
 HideWindow() {
     global guiWin, closeEpoch, wvCore
-    ; 先立刻藏窗，避免等 WMI/WebView 拆除才消失
+    ; 先立刻藏窗；Alt+空格连按时不要马上拆 WebView（否则会空白）
     closeEpoch += 1
     ep := closeEpoch
     try {
         if IsObject(guiWin)
             guiWin.Hide()
     }
-    ; 藏窗后再异步清空页面，减轻 WebView.Close 拆大 DOM 的卡顿
+    ; 只落盘会话，不清空 DOM；先把已下完任务收成 done，再落盘，避免重开变「已暂停」
+    try DlFinalizeCompleteJobs()
+    try DlSaveJobs(true)
     SetTimer(LightenDashboardPage.Bind(ep), -30)
-    SetTimer(TearDownDashboardUi.Bind(ep), -150)
+    ; 闲置足够久再拆，避免连按开关拆到一半 / 误杀新 WebView 进程
+    SetTimer(TearDownDashboardUi.Bind(ep), -45000)
 }
 
 LightenDashboardPage(ep := 0) {
@@ -1003,7 +1029,7 @@ LightenDashboardPage(ep := 0) {
         return
     try {
         if IsObject(wvCore)
-            wvCore.ExecuteScriptAsync("try{if(window.__lightenForClose)window.__lightenForClose();else document.body&&(document.body.innerHTML='')}catch(e){}")
+            wvCore.ExecuteScriptAsync("try{if(window.__lightenForClose)window.__lightenForClose()}catch(e){}")
     }
 }
 
@@ -1014,12 +1040,29 @@ TearDownDashboardUi(ep := 0) {
     ; 用户已再次打开 → 作废这次拆除
     if ep && ep != closeEpoch
         return
+    ; 有下载任务时保留 WebView/AHK 后台，让 aria2 继续跑；稍后再试拆除
+    try {
+        if DlHasActiveJobs() {
+            AppLog("TearDownDashboardUi deferred: active downloads")
+            SetTimer(TearDownDashboardUi.Bind(ep), -30000)
+            return
+        }
+    }
     static tearing := false
     if tearing
         return
     tearing := true
     try {
-        ; 轻量取消：只杀已知 pid，不做慢 WMI 全盘扫
+        ; 再确认一次：拆之前若已唤出则中止
+        if ep && ep != closeEpoch
+            return
+        try {
+            if DlHasActiveJobs() {
+                AppLog("TearDownDashboardUi deferred again: active downloads")
+                SetTimer(TearDownDashboardUi.Bind(ep), -30000)
+                return
+            }
+        }
         CancelActiveSearch("teardown", false)
         StopProcMonitor()
         HideLoadSplash()
@@ -1047,6 +1090,8 @@ TearDownDashboardUi(ep := 0) {
                 }
             }
         }
+        if ep && ep != closeEpoch
+            return
         try {
             if IsObject(wv)
                 wv.Close()
@@ -1054,6 +1099,24 @@ TearDownDashboardUi(ep := 0) {
         wv := ""
         wvCore := ""
         webMsgSub := ""
+        if ep && ep != closeEpoch {
+            ; 已关 Core，但用户要看窗 → 重建
+            try {
+                if IsObject(guiWin)
+                    guiWin.Destroy()
+            }
+            guiWin := ""
+            uiReady := false
+            mainUiEntered := false
+            mainUiEntering := false
+            pageNavIssued := false
+            bootRevealDone := false
+            bootStubShown := false
+            wvBuilding := false
+            bootOn := true
+            SetTimer(ShowWindow, -30)
+            return
+        }
         try {
             if IsObject(guiWin)
                 guiWin.Destroy()
@@ -1067,9 +1130,9 @@ TearDownDashboardUi(ep := 0) {
         bootStubShown := false
         wvBuilding := false
         bootOn := true
-        ; 保留 evReady / Everything；稍后再清残留 renderer
+        ; 杀残留进程时带上 epoch：若已重开则绝不杀（WebView2 常共用 browser 进程）
         if pids.Length
-            SetTimer(KillDashWebViewPids.Bind(UniqPids(pids)), -600)
+            SetTimer(KillDashWebViewPids.Bind(UniqPids(pids), ep), -1200)
         AppLog("TearDownDashboardUi pids=" pids.Length " evReady kept")
     } finally {
         tearing := false
@@ -1088,7 +1151,13 @@ UniqPids(arr) {
     return out
 }
 
-KillDashWebViewPids(pids, *) {
+KillDashWebViewPids(pids, ep := 0, *) {
+    global closeEpoch, wvCore, guiWin
+    ; 已重新打开仪表盘：禁止杀进程（会把新 WebView 弄成空白）
+    if ep && ep != closeEpoch
+        return
+    if IsObject(wvCore) || IsObject(guiWin)
+        return
     if !IsObject(pids)
         return
     for pid in pids {
@@ -1416,15 +1485,7 @@ B64DecodeToFile(b64, path) {
     buf := Buffer(size)
     if !DllCall("crypt32\CryptStringToBinaryW", "WStr", b64, "UInt", 0, "UInt", 1, "Ptr", buf, "UInt*", &size, "Ptr", 0, "Ptr", 0)
         return false
-    SplitPath path, , &dir
-    if dir != ""
-        DirCreate dir
-    f := FileOpen(path, "w")
-    if !IsObject(f)
-        return false
-    f.RawWrite(buf)
-    f.Close()
-    return FileExist(path) && FileGetSize(path) > 0
+    return WriteBinaryFile(path, buf, size)
 }
 
 ; ── emoji.txt 便携同步（%HELPME_HOME%\ahk\config\emoji.txt ↔ 脚本注释 base64）──
@@ -1865,9 +1926,9 @@ DownloadFile(url, dest) {
             partName := destName ".part"
             partPath := destDir "\" partName
             try FileDelete partPath
-            ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            cmd := Format('"{1}" -c -x 16 -s 16 -k 1M --connect-timeout=20 --timeout=180 --max-tries=3 --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --user-agent="{5}" -d "{2}" -o "{3}" "{4}"'
-                , aria, destDir, partName, url, ua)
+            hdr := Aria2BrowserHeaderArgs(url)
+            cmd := Format('"{1}" -c -x 16 -s 16 -k 1M --max-connection-per-server=16 --connect-timeout=20 --timeout=180 --max-tries=3 --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --check-certificate=false{5} -d "{2}" -o "{3}" "{4}"'
+                , aria, destDir, partName, url, hdr)
             pid := 0
             Run(cmd, , "Hide", &pid)
             t0 := A_TickCount
@@ -2540,6 +2601,7 @@ ExpandGithubDownloadUrls(url) {
     else if RegExMatch(url, "i)^https://kkgithub\.com/(.+)$", &m)
         gh := m[1]
     if gh != "" {
+        ; 主页依赖下载：默认用户镜像优先，其余作失败后备
         for x in [
             "https://gh.tszai.cn/https://github.com/" gh,
             "https://ghproxy.net/https://github.com/" gh,
@@ -3201,7 +3263,7 @@ DefaultImageProcPipeJson() {
         . '"https://hf-mirror.com/ZhengPeng7/BiRefNet/resolve/main/model.safetensors",'
         . '"https://huggingface.co/ZhengPeng7/BiRefNet/resolve/main/model.safetensors"]},'
         . '"pip":{"label":"pip 依赖","title":"BiRefNet 推理依赖","size":"~100-200 MB","local":"python\\Lib\\site-packages","packages":['
-        . '"typing_extensions","transformers==4.46.3","timm","einops","pillow","scipy","kornia"]},'
+        . '"typing_extensions","transformers==4.46.3","accelerate>=0.26.0","timm","einops","pillow","scipy","kornia"]},'
         . '"script":{"label":"脚本","title":"remove_bg.py","size":"BiRefNet CLI","local":"script\\remove_bg.py","kind":"script","note":"可编辑脚本，保存后双向同步"}'
         . '}}'
     )
@@ -3525,43 +3587,103 @@ EmitImageProcResult(ok, inPath, outPath, err := "") {
     try wvCore.ExecuteScriptAsync(js)
 }
 
-; 把 dataURL/base64 写到指定 PNG（供粘贴/裁剪/最终保存复用）
+; 二进制落盘：必须 UTF-8-RAW / 无 BOM，否则 FileEncoding UTF-8 会写成 EF BB BF 毁图
+WriteBinaryFile(path, buf, bytes := -1) {
+    path := Trim(String(path))
+    if path = "" || !IsObject(buf)
+        return false
+    if bytes < 0
+        bytes := buf.Size
+    if bytes < 1
+        return false
+    SplitPath path, , &outDir
+    if outDir != ""
+        try DirCreate outDir
+    try FileDelete path
+    ; UTF-8-RAW：不写 BOM；RawWrite 按字节写出
+    f := FileOpen(path, "w", "UTF-8-RAW")
+    if !IsObject(f)
+        return false
+    written := f.RawWrite(buf, bytes)
+    f.Close()
+    return written = bytes && FileExist(path) && FileGetSize(path) = bytes
+}
+
+; 若落盘内容不是 PNG（如粘贴 JPEG），用 GDI+ 转成真 PNG
+EnsureFileIsPng(path) {
+    path := Trim(String(path))
+    if path = "" || !FileExist(path)
+        return false
+    try {
+        f := FileOpen(path, "r", "UTF-8-RAW")
+        if !IsObject(f)
+            return false
+        head := Buffer(8, 0)
+        f.RawRead(head, 8)
+        f.Close()
+        if NumGet(head, 0, "UChar") = 0x89
+            && NumGet(head, 1, "UChar") = 0x50
+            && NumGet(head, 2, "UChar") = 0x4E
+            && NumGet(head, 3, "UChar") = 0x47
+            return true ; 已是 PNG
+    } catch {
+        return false
+    }
+    DllCall("LoadLibrary", "Str", "gdiplus.dll", "Ptr")
+    si := Buffer(24, 0)
+    NumPut("UInt", 1, si)
+    pToken := 0
+    DllCall("gdiplus\GdiplusStartup", "UPtr*", &pToken, "Ptr", si, "Ptr", 0)
+    if !pToken
+        return false
+    pBitmap := 0
+    ok := false
+    try {
+        if DllCall("gdiplus\GdipCreateBitmapFromFile", "WStr", path, "UPtr*", &pBitmap) || !pBitmap
+            return false
+        tmp := path ".__to_png.tmp"
+        if SaveGdipBitmapAsPng(pBitmap, tmp) = ""
+            return false
+        try FileMove tmp, path, true
+        catch {
+            try FileCopy tmp, path, true
+            try FileDelete tmp
+        }
+        ok := FileExist(path)
+    } finally {
+        if pBitmap
+            try DllCall("gdiplus\GdipDisposeImage", "UPtr", pBitmap)
+        if pToken
+            try DllCall("gdiplus\GdiplusShutdown", "UPtr", pToken)
+    }
+    return ok
+}
+
+; 把 dataURL/base64 写到指定 PNG（原生解码；自动纠正 JPEG→PNG；无 BOM）
 WritePngFromB64(b64, destPath) {
-    global IMAGE_PROC_DIR
     b64 := Trim(String(b64))
     destPath := Trim(String(destPath))
     if b64 = "" || destPath = ""
         return false
     if RegExMatch(b64, "i)^data:image/[^;]+;base64,(.+)$", &m)
         b64 := m[1]
-    try DirCreate IMAGE_PROC_DIR
-    SplitPath destPath, , &outDir
-    if outDir != ""
-        try DirCreate outDir
-    tmp := IMAGE_PROC_DIR "\_b64_write_tmp.png"
-    b64File := IMAGE_PROC_DIR "\_b64_write_tmp.b64"
-    ps1 := IMAGE_PROC_DIR "\_b64_write_tmp.ps1"
-    try FileDelete tmp
-    try FileDelete b64File
-    try FileDelete ps1
-    FileAppend b64, b64File, "UTF-8-RAW"
-    script := "$b = [IO.File]::ReadAllText('" b64File "') -replace '\s',''`r`n"
-        . "[IO.File]::WriteAllBytes('" tmp "', [Convert]::FromBase64String($b))`r`n"
-    FileAppend script, ps1, "UTF-8-RAW"
-    exitCode := 1
-    try exitCode := RunWait(A_ComSpec ' /c powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' ps1 '"', , "Hide")
-    catch {
-        exitCode := 1
-    }
-    try FileDelete ps1
-    try FileDelete b64File
-    if exitCode != 0 || !FileExist(tmp)
+    b64 := RegExReplace(b64, "\s+")
+    if b64 = ""
         return false
-    try FileMove tmp, destPath, true
-    catch {
-        try FileCopy tmp, destPath, true
-    }
-    return FileExist(destPath)
+    size := 0
+    if !DllCall("crypt32\CryptStringToBinaryW", "WStr", b64, "UInt", 0, "UInt", 1
+        , "Ptr", 0, "UInt*", &size, "Ptr", 0, "Ptr", 0) || size < 1
+        return false
+    buf := Buffer(size)
+    if !DllCall("crypt32\CryptStringToBinaryW", "WStr", b64, "UInt", 0, "UInt", 1
+        , "Ptr", buf, "UInt*", &size, "Ptr", 0, "Ptr", 0)
+        return false
+    if !WriteBinaryFile(destPath, buf, size)
+        return false
+    ; 粘贴截图经常是 JPEG，扩展名却是 .png → 转成真 PNG
+    if !EnsureFileIsPng(destPath)
+        return false
+    return true
 }
 
 ; Ctrl+V 位图 → 仅内部临时预览（不写桌面）；点保存才落到用户目录
@@ -3599,28 +3721,362 @@ CacheEditPreview(b64, *) {
     EmitImageProcResult(false, dest, "", "preview-only")
 }
 
+; 关闭窗口前落盘内存预览，便于重开恢复（静默，不刷界面）
+PersistImgProcSessionPreview(b64, *) {
+    global IMAGE_PROC_DIR, wvCore
+    try DirCreate IMAGE_PROC_DIR
+    dest := IMAGE_PROC_DIR "\session_edit.png"
+    if !WritePngFromB64(b64, dest)
+        return
+    if IsObject(wvCore) {
+        js := "try{window.__imageProcSessionPersisted&&window.__imageProcSessionPersisted(" JStr(dest) ")}catch(e){}"
+        try wvCore.ExecuteScriptAsync(js)
+    }
+}
+
+; 重开修图：按路径回传预览 URL（保持对比状态）
+EmitImageProcRestore(inPath, outPath, state := "idle") {
+    global wvCore, IMAGE_PROC_DIR
+    if !IsObject(wvCore)
+        return
+    inPath := Trim(String(inPath))
+    outPath := Trim(String(outPath))
+    state := Trim(String(state))
+    if state = ""
+        state := "idle"
+    ; 关闭前内存图画到 session_edit.png
+    if inPath = "" || inPath = "__SESSION_EDIT__" || inPath = "__session_edit__" {
+        cand := IMAGE_PROC_DIR "\session_edit.png"
+        if FileExist(cand)
+            inPath := cand
+        else if inPath = "__SESSION_EDIT__" || inPath = "__session_edit__"
+            inPath := ""
+    }
+    if outPath = "" || outPath = "__SESSION_EDIT__" {
+        ; ignore
+    }
+    inUrl := (inPath != "" && FileExist(inPath)) ? FileUrlForPreview(inPath) : ""
+    outUrl := (outPath != "" && FileExist(outPath)) ? FileUrlForPreview(outPath) : ""
+    js := "try{window.__imageProcRestore&&window.__imageProcRestore("
+        . "{inPath:" JStr(inPath)
+        . ",outPath:" JStr(outPath)
+        . ",inUrl:" JStr(inUrl)
+        . ",outUrl:" JStr(outUrl)
+        . ",state:" JStr(state)
+        . "})}catch(e){}"
+    try wvCore.ExecuteScriptAsync(js)
+}
+
+; 通知前端：已复制到剪切板
+EmitImageProcCopiedToClip(ok, detail := "") {
+    global wvCore
+    if !IsObject(wvCore)
+        return
+    js := "try{window.__imageProcCopiedToClip&&window.__imageProcCopiedToClip("
+        . (ok ? "true" : "false") "," JStr(String(detail)) ")}catch(e){}"
+    try wvCore.ExecuteScriptAsync(js)
+}
+
+; 通知前端：保存对话框结果（取消/失败也要有反馈）
+EmitImageProcSaveResult(ok, detail := "") {
+    global wvCore
+    if !IsObject(wvCore)
+        return
+    js := "try{window.__imageProcSaveResult&&window.__imageProcSaveResult("
+        . (ok ? "true" : "false") "," JStr(String(detail)) ")}catch(e){}"
+    try wvCore.ExecuteScriptAsync(js)
+}
+
+; 修图结果 → 剪切板：按「图片文件」CF_HDROP（资源管理器 Ctrl+V 可粘贴文件）
+CopyImgProcToClipboard(srcPath, *) {
+    srcPath := Trim(String(srcPath))
+    if srcPath = "" || !FileExist(srcPath) {
+        EmitImageProcLog("[X] 没有可复制的图片`n", false)
+        EmitImageProcCopiedToClip(false, "没有可复制的图片")
+        return
+    }
+    stage := StageImgProcClipFile(srcPath, ".png")
+    if stage = "" {
+        EmitImageProcLog("[X] 复制失败：无法准备图片文件`n", false)
+        EmitImageProcCopiedToClip(false, "无法准备图片文件")
+        return
+    }
+    if SetClipboardFiles([stage]) {
+        EmitImageProcLog("[√] 已复制图片文件到剪切板（可粘贴到桌面/文件夹）`n", false)
+        EmitImageProcCopiedToClip(true, imgProcBaseNameSafe(stage))
+    } else {
+        EmitImageProcLog("[X] 复制失败：写入剪切板（文件）失败`n", false)
+        EmitImageProcCopiedToClip(false, "写入剪切板失败")
+    }
+}
+
+; 内存 dataURL → 临时 PNG 文件 → CF_HDROP
+CopyImgProcDataUrlToClipboard(b64, *) {
+    global IMAGE_PROC_DIR
+    try DirCreate IMAGE_PROC_DIR
+    dest := IMAGE_PROC_DIR "\clip_copy_tmp.png"
+    if !WritePngFromB64(b64, dest) {
+        EmitImageProcLog("[X] 复制失败（写入/转码 PNG）`n", false)
+        EmitImageProcCopiedToClip(false, "写入/转码 PNG 失败")
+        return
+    }
+    stage := StageImgProcClipFile(dest, ".png")
+    if stage = ""
+        stage := dest
+    if SetClipboardFiles([stage]) {
+        EmitImageProcLog("[√] 已复制图片文件到剪切板（可粘贴到桌面/文件夹）`n", false)
+        EmitImageProcCopiedToClip(true, "内存预览")
+    } else {
+        EmitImageProcLog("[X] 复制失败：写入剪切板（文件）失败`n", false)
+        EmitImageProcCopiedToClip(false, "写入剪切板失败")
+    }
+}
+
+; 复制用暂存文件（友好文件名，避免直接暴露内部路径）
+StageImgProcClipFile(srcPath, forceExt := "") {
+    global IMAGE_PROC_DIR
+    srcPath := Trim(String(srcPath))
+    if srcPath = "" || !FileExist(srcPath)
+        return ""
+    try DirCreate IMAGE_PROC_DIR "\clipboard"
+    SplitPath srcPath, &baseName, , &ext, &noext
+    name := baseName != "" ? baseName : ("image_" FormatTime(, "yyyyMMdd_HHmmss"))
+    if forceExt != "" {
+        fe := forceExt
+        if !RegExMatch(fe, "^\.")
+            fe := "." fe
+        name := RegExReplace(noext != "" ? noext : name, "\.[^.]+$", "") fe
+    } else if ext = "" {
+        name .= ".png"
+    }
+    name := RegExReplace(name, '[<>:"/\\|?*]', "_")
+    dest := IMAGE_PROC_DIR "\clipboard\" name
+    try FileCopy srcPath, dest, 1
+    if !FileExist(dest)
+        return ""
+    return dest
+}
+
+; size×size ICO：剪贴板放「可预览位图 + ICO 文件」；src 可为文件路径
+CopyImgProcAsIco(srcPath, size := 32, *) {
+    srcPath := Trim(String(srcPath))
+    size := Integer(size)
+    if !(size = 16 || size = 32 || size = 48 || size = 64 || size = 128 || size = 256) {
+        EmitImageProcLog("[X] 不支持的 ICO 尺寸`n", false)
+        EmitImageProcCopiedToClip(false, "不支持的 ICO 尺寸")
+        return
+    }
+    if srcPath = "" || !FileExist(srcPath) {
+        EmitImageProcLog("[X] 没有可复制的图片`n", false)
+        EmitImageProcCopiedToClip(false, "没有可复制的图片")
+        return
+    }
+    global IMAGE_PROC_DIR
+    try DirCreate IMAGE_PROC_DIR "\clipboard"
+    SplitPath srcPath, , , , &noext
+    base := noext != "" ? noext : "icon"
+    base := RegExReplace(base, '[<>:"/\\|?*]', "_")
+    ; 临时源不要污染导出文件名
+    if RegExMatch(base, "i)^_tmp_ico_src$|^_ico_src")
+        base := "icon"
+    pngPath := IMAGE_PROC_DIR "\clipboard\" base "_" size ".png"
+    icoPath := IMAGE_PROC_DIR "\clipboard\" base "_" size ".ico"
+    if !SaveImageAsIcoFile(srcPath, icoPath, size, pngPath) {
+        EmitImageProcLog("[X] 生成 " size "×" size " ICO 失败`n", false)
+        EmitImageProcCopiedToClip(false, "生成 ICO 失败")
+        return
+    }
+    ; 聊天/画图：PNG+DIB 预览；资源管理器：只贴 .ico（不要再附带 _ico_src_*_48.png）
+    okImg := SetClipboardImage(pngPath)
+    okFile := false
+    if okImg {
+        ; 在已有图像格式上追加 CF_HDROP（不 Empty，避免冲掉预览）
+        okFile := AppendClipboardFiles([icoPath])
+    } else {
+        okFile := SetClipboardFiles([icoPath])
+    }
+    if okImg || okFile {
+        tip := size "×" size " ICO"
+        if okImg && okFile
+            EmitImageProcLog("[√] 已复制 " tip "（图像预览 + 文件）`n", false)
+        else if okImg
+            EmitImageProcLog("[√] 已复制 " tip " 图像到剪切板`n", false)
+        else
+            EmitImageProcLog("[√] 已复制 " tip " 文件到剪切板（可粘贴到文件夹）`n", false)
+        EmitImageProcCopiedToClip(true, tip)
+    } else {
+        EmitImageProcLog("[X] ICO 已生成但写入剪切板失败`n", false)
+        EmitImageProcCopiedToClip(false, "写入剪切板失败")
+    }
+}
+
+; dataURL → 落盘再转 ICO（裁剪预览未落盘时直达，避免卡在 cache 回调）
+CopyImgProcAsIcoData(b64, size := 32, *) {
+    global IMAGE_PROC_DIR
+    size := Integer(size)
+    try DirCreate IMAGE_PROC_DIR "\clipboard"
+    ; 用中性临时名，避免最终 ico/png 叫成 _ico_src_48_48.*
+    tmp := IMAGE_PROC_DIR "\clipboard\_tmp_ico_src.png"
+    if !WritePngFromB64(b64, tmp) {
+        EmitImageProcLog("[X] ICO 失败：无法解码预览图`n", false)
+        EmitImageProcCopiedToClip(false, "无法解码预览图")
+        return
+    }
+    CopyImgProcAsIco(tmp, size)
+    try FileDelete tmp
+}
+
+; 缩放到 size×size（居中透明底）→ PNG + PNG-in-ICO；pngOut 可选保留预览 PNG
+SaveImageAsIcoFile(srcPath, icoPath, size, pngOut := "") {
+    srcPath := Trim(String(srcPath))
+    icoPath := Trim(String(icoPath))
+    size := Integer(size)
+    if srcPath = "" || icoPath = "" || size < 1 || !FileExist(srcPath)
+        return false
+    if !EnsureGdiplus()
+        return false
+    pSrc := 0, pDst := 0, gfx := 0
+    scanBuf := ""
+    pngTmp := (pngOut != "" ? pngOut : (icoPath ".png.tmp"))
+    keepPng := (pngOut != "")
+    ok := false
+    try {
+        if DllCall("gdiplus\GdipCreateBitmapFromFile", "WStr", srcPath, "Ptr*", &pSrc) || !pSrc
+            return false
+        w := 0, h := 0
+        DllCall("gdiplus\GdipGetImageWidth", "Ptr", pSrc, "UInt*", &w)
+        DllCall("gdiplus\GdipGetImageHeight", "Ptr", pSrc, "UInt*", &h)
+        if w < 1 || h < 1
+            return false
+        ; 自备像素缓冲的 32bpp ARGB（比 stride=0/scan0=NULL 更稳）
+        stride := size * 4
+        scanBuf := Buffer(stride * size, 0)
+        if DllCall("gdiplus\GdipCreateBitmapFromScan0", "Int", size, "Int", size, "Int", stride
+            , "Int", 0x26200A, "Ptr", scanBuf.Ptr, "Ptr*", &pDst) || !pDst
+            return false
+        if DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", pDst, "Ptr*", &gfx) || !gfx
+            return false
+        DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", gfx, "Int", 7) ; HighQualityBicubic
+        DllCall("gdiplus\GdipSetPixelOffsetMode", "Ptr", gfx, "Int", 2)
+        DllCall("gdiplus\GdipSetSmoothingMode", "Ptr", gfx, "Int", 4)
+        DllCall("gdiplus\GdipSetCompositingMode", "Ptr", gfx, "Int", 0) ; SourceOver
+        DllCall("gdiplus\GdipGraphicsClear", "Ptr", gfx, "UInt", 0x00000000)
+        scale := Min(size / w, size / h)
+        dw := Max(1, Integer(Round(w * scale)))
+        dh := Max(1, Integer(Round(h * scale)))
+        dx := (size - dw) // 2
+        dy := (size - dh) // 2
+        DllCall("gdiplus\GdipDrawImageRectRect", "Ptr", gfx, "Ptr", pSrc
+            , "Float", dx, "Float", dy, "Float", dw, "Float", dh
+            , "Float", 0, "Float", 0, "Float", w, "Float", h
+            , "Int", 2, "Ptr", 0, "Ptr", 0, "Ptr", 0)
+        if SaveGdipBitmapAsPng(pDst, pngTmp) = ""
+            return false
+        ok := WrapPngFileAsIco(pngTmp, icoPath, size)
+    } finally {
+        if gfx
+            try DllCall("gdiplus\GdipDeleteGraphics", "Ptr", gfx)
+        if pDst
+            try DllCall("gdiplus\GdipDisposeImage", "Ptr", pDst)
+        if pSrc
+            try DllCall("gdiplus\GdipDisposeImage", "Ptr", pSrc)
+        if !keepPng
+            try FileDelete pngTmp
+    }
+    return ok && FileExist(icoPath) && (!keepPng || FileExist(pngTmp))
+}
+
+; Vista+ PNG 压缩 ICO（单尺寸）
+WrapPngFileAsIco(pngPath, icoPath, size) {
+    pngPath := Trim(String(pngPath))
+    icoPath := Trim(String(icoPath))
+    size := Integer(size)
+    if !FileExist(pngPath)
+        return false
+    ; 必须 RAW，避免读入/写出 UTF-8 BOM 把 ICO 头毁掉（表现为「无法打开此图片」）
+    f := FileOpen(pngPath, "r", "UTF-8-RAW")
+    if !IsObject(f)
+        return false
+    pngSz := f.Length
+    if pngSz < 24 {
+        f.Close()
+        return false
+    }
+    pngBuf := Buffer(pngSz)
+    f.RawRead(pngBuf)
+    f.Close()
+    if NumGet(pngBuf, 0, "UChar") != 0x89 || NumGet(pngBuf, 1, "UChar") != 0x50
+        return false
+    ; ICONDIR(6) + ICONDIRENTRY(16) + PNG
+    hdr := 6 + 16
+    out := Buffer(hdr + pngSz, 0)
+    NumPut("UShort", 0, out, 0)          ; reserved
+    NumPut("UShort", 1, out, 2)          ; type = icon
+    NumPut("UShort", 1, out, 4)          ; count
+    bw := (size >= 256) ? 0 : size
+    bh := (size >= 256) ? 0 : size
+    NumPut("UChar", bw, out, 6)
+    NumPut("UChar", bh, out, 7)
+    NumPut("UChar", 0, out, 8)           ; color count
+    NumPut("UChar", 0, out, 9)           ; reserved
+    ; PNG 压缩 ICO：planes/bitcount 须为 0（MSDN）
+    NumPut("UShort", 0, out, 10)         ; planes
+    NumPut("UShort", 0, out, 12)         ; bit count
+    NumPut("UInt", pngSz, out, 14)       ; bytes in res
+    NumPut("UInt", hdr, out, 18)         ; image offset
+    DllCall("RtlMoveMemory", "Ptr", out.Ptr + hdr, "Ptr", pngBuf.Ptr, "UPtr", pngSz)
+    try FileDelete icoPath
+    wf := FileOpen(icoPath, "w", "UTF-8-RAW")
+    if !IsObject(wf)
+        return false
+    wf.RawWrite(out)
+    wf.Close()
+    ; 校验：禁止 BOM / 必须是合法 ICONDIR
+    if !FileExist(icoPath)
+        return false
+    chk := FileOpen(icoPath, "r", "UTF-8-RAW")
+    if !IsObject(chk)
+        return false
+    b0 := chk.ReadUChar(), b1 := chk.ReadUChar()
+    chk.Close()
+    if b0 = 0xEF && b1 = 0xBB
+        return false
+    if b0 != 0 || b1 != 0
+        return false
+    return true
+}
+
+imgProcBaseNameSafe(path) {
+    n := ""
+    try SplitPath path, &n
+    return n != "" ? n : String(path)
+}
+
 ; 最终保存：把内存 dataURL 写入用户所选路径
 SaveImgProcDataUrl(suggestPath, b64, *) {
     global IMAGE_PROC_DIR, wvCore
     suggestPath := Trim(String(suggestPath))
-    initDir := ""
+    ; 保存对话框默认打开桌面目录树
+    initDir := EnvGet("USERPROFILE") "\Desktop"
     initName := ""
     if suggestPath != ""
-        SplitPath suggestPath, &initName, &initDir
-    if initDir = "" || initName = "" {
-        initDir := EnvGet("USERPROFILE") "\Desktop"
+        SplitPath suggestPath, &initName
+    if initName = ""
         initName := "image_" FormatTime(, "yyyyMMdd_HHmmss") ".png"
-    }
-    startPath := (initDir != "" ? initDir "\" : "") initName
+    if !RegExMatch(initName, "i)\.png$")
+        initName .= ".png"
+    startPath := initDir "\" initName
     dest := FileSelect("S16", startPath, "保存图片", "PNG 图片 (*.png)")
     if dest = "" {
         EmitImageProcLog("[i] 已取消保存`n", false)
+        EmitImageProcSaveResult(false, "已取消保存")
         return
     }
     if !RegExMatch(dest, "i)\.png$")
         dest .= ".png"
     if !WritePngFromB64(b64, dest) {
         EmitImageProcLog("[X] 保存失败`n", false)
+        EmitImageProcSaveResult(false, "保存失败")
         return
     }
     EmitImageProcLog("[√] 已保存: " dest "`n", false)
@@ -3637,27 +4093,29 @@ SaveImgProcResult(srcPath, suggestPath := "", *) {
     suggestPath := Trim(String(suggestPath))
     if srcPath = "" || !FileExist(srcPath) {
         EmitImageProcLog("[X] 没有可保存的图片`n", false)
+        EmitImageProcSaveResult(false, "没有可保存的图片")
         return
     }
-    initDir := ""
+    ; 保存对话框默认打开桌面目录树；只沿用建议文件名
+    initDir := EnvGet("USERPROFILE") "\Desktop"
     initName := ""
-    if suggestPath != "" {
-        SplitPath suggestPath, &initName, &initDir
+    if suggestPath != ""
+        SplitPath suggestPath, &initName
+    if initName = "" {
+        SplitPath srcPath, , , , &noExt
+        if InStr(StrLower(srcPath), "remove_bg_preview") || InStr(StrLower(srcPath), "paste_preview")
+            || InStr(StrLower(srcPath), "edit_preview") || InStr(StrLower(srcPath), "drag_")
+            initName := "image_" FormatTime(, "yyyyMMdd_HHmmss") ".png"
+        else
+            initName := (noExt != "" ? noExt : "image") "_2.png"
     }
-    if initDir = "" || initName = "" {
-        SplitPath srcPath, , &dir, , &noExt
-        initDir := dir
-        ; 临时预览不要建议成 remove_bg_preview_2.png；回落到桌面
-        if InStr(StrLower(srcPath), "remove_bg_preview") {
-            initDir := EnvGet("USERPROFILE") "\Desktop"
-            initName := "remove_bg_" FormatTime(, "yyyyMMdd_HHmmss") ".png"
-        } else
-            initName := (noExt != "" ? noExt : "remove_bg") "_2.png"
-    }
-    startPath := (initDir != "" ? initDir "\" : "") initName
+    if !RegExMatch(initName, "i)\.png$")
+        initName .= ".png"
+    startPath := initDir "\" initName
     dest := FileSelect("S16", startPath, "保存图片", "PNG 图片 (*.png)")
     if dest = "" {
         EmitImageProcLog("[i] 已取消保存`n", false)
+        EmitImageProcSaveResult(false, "已取消保存")
         return
     }
     if !RegExMatch(dest, "i)\.png$")
@@ -3671,10 +4129,12 @@ SaveImgProcResult(srcPath, suggestPath := "", *) {
     try FileCopy srcPath, dest, true
     catch as e {
         EmitImageProcLog("[X] 保存失败: " e.Message "`n", false)
+        EmitImageProcSaveResult(false, "保存失败: " e.Message)
         return
     }
     if !FileExist(dest) {
         EmitImageProcLog("[X] 保存失败: 目标未写入`n", false)
+        EmitImageProcSaveResult(false, "保存失败: 目标未写入")
         return
     }
     EmitImageProcLog("[√] 已保存: " dest "`n", false)
@@ -3734,8 +4194,8 @@ KillStaleRemoveBgPython() {
     } catch {
     }
     if killed > 0 {
-        EmitImageProcLog("[!] 已结束残留抠图进程 x" killed "（释放 CUDA）`n", false)
-        Sleep 600
+        EmitImageProcLog("[!] 已结束残留抠图进程 x" killed "`n", false)
+        Sleep 400
     }
 }
 
@@ -3848,9 +4308,8 @@ EnsureCudaTorchForRemoveBg(cmdExt, pyExe) {
 
 ; imageProcRemoveBg|input|output|modelDir|threshold|feather|close
 ; output 为空 / __temp__：只写临时预览，等用户点「保存」再落到原图旁
-StartRemoveBg(inputPath, outputPath, modelDir := "", thr := "", feather := "", closePx := "") {
+StartRemoveBg(inputPath, outputPath, modelDir := "", thr := "", feather := "", closePx := "", forceCpu := false) {
     global REMOVE_BG_BUSY, REMOVE_BG_PID, REMOVE_BG_JOB, IMAGE_PROC_DIR
-    ; 上次轮询因 global 漏写卡住时：进程已死则强制解锁
     if REMOVE_BG_BUSY {
         if REMOVE_BG_PID && ProcessExist(REMOVE_BG_PID) {
             EmitImageProcLog("[!] 抠图任务进行中，请稍候`n", false)
@@ -3887,16 +4346,14 @@ StartRemoveBg(inputPath, outputPath, modelDir := "", thr := "", feather := "", c
         EmitImageProcResult(false, inputPath, outputPath, "no python")
         return
     }
-    ; 若 torch 被换成 CPU 版 → 抠图必挂；开跑前尽量钉回 cu118
-    try EnsureCudaTorchForRemoveBg(cmdExt, pyExe)
     if !FileExist(script) {
         try SyncRemoveBgScriptFiles()
     }
     if !FileExist(script) {
         try DirCreate(cmdExt "\script")
         for src in [A_ScriptDir "\ai\script\remove_bg.py", A_ScriptDir "\remove_bg.py"] {
-        if FileExist(src) {
-            try FileCopy src, script, true
+            if FileExist(src) {
+                try FileCopy src, script, true
                 break
             }
         }
@@ -3929,21 +4386,19 @@ StartRemoveBg(inputPath, outputPath, modelDir := "", thr := "", feather := "", c
     EmitImageProcLog("[i] in  " inputPath "`n", false)
     EmitImageProcLog("[i] out " outputPath " （未保存到用户目录）`n", false)
     EmitImageProcLog("[i] model " modelDir "`n", false)
-    EmitImageProcLog("[i] params thr=" thr " feather=" feather " close=" closePx "`n", false)
-    ; 立即刷原图预览
+    EmitImageProcLog("[i] params thr=" thr " feather=" feather " close=" closePx
+        . " size=1024 device=cuda`n", false)
     EmitImageProcResult(false, inputPath, "", "preview-only")
 
-    ; 路径含空格：全部加引号；退出码写入文件（避免 echo N>file 坑）
+    ; 单次进程 + CUDA（以前 ~3s 的路径）；质量固定 size=1024
+    deviceFlag := forceCpu ? "--cpu" : "--cuda"
     batBody := Format(
         "@echo off`r`nset PYTHONUNBUFFERED=1`r`nset PYTHONIOENCODING=utf-8`r`n"
-        . "set PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128`r`n"
-        . "set CUDA_DEVICE_ORDER=PCI_BUS_ID`r`n"
-        . "set CUDA_VISIBLE_DEVICES=0`r`n"
-        . '"{1}" -u "{2}" -i "{3}" -o "{4}" -m "{5}" --size 1024 --threshold {6} --feather {7} --close {8} > "{9}" 2>&1`r`n'
+        . '"{1}" -u "{2}" -i "{3}" -o "{4}" -m "{5}" --size 1024 --threshold {6} --feather {7} --close {8} {9} > "{10}" 2>&1`r`n'
         . "set EC=%ERRORLEVEL%`r`n"
-        . '> "{10}" echo %EC%`r`n'
+        . '> "{11}" echo %EC%`r`n'
         . "exit /b %EC%`r`n",
-        pyExe, script, inputPath, outputPath, modelDir, thr, feather, closePx, outLog, ecFile)
+        pyExe, script, inputPath, outputPath, modelDir, thr, feather, closePx, deviceFlag, outLog, ecFile)
     FileAppend batBody, bat, "UTF-8-RAW"
 
     REMOVE_BG_BUSY := true
@@ -3951,6 +4406,7 @@ StartRemoveBg(inputPath, outputPath, modelDir := "", thr := "", feather := "", c
     REMOVE_BG_JOB := {
         in: inputPath, out: outputPath,
         model: modelDir, thr: thr, feather: feather, close: closePx,
+        forceCpu: !!forceCpu,
         log: outLog, ec: ecFile, bat: bat,
         pos: 0, t0: A_TickCount, beat: 0
     }
@@ -3966,13 +4422,12 @@ StartRemoveBg(inputPath, outputPath, modelDir := "", thr := "", feather := "", c
 }
 
 PollRemoveBgJob(*) {
-    global REMOVE_BG_BUSY, REMOVE_BG_PID, REMOVE_BG_JOB, uiSizeMove
+    global REMOVE_BG_BUSY, REMOVE_BG_PID, REMOVE_BG_JOB, REMOVE_BG_RETRY, uiSizeMove
     if !REMOVE_BG_BUSY || !IsObject(REMOVE_BG_JOB)
         return
     if uiSizeMove
         return
     job := REMOVE_BG_JOB
-    ; 刷增量日志
     try {
         if FileExist(job.log) {
             f := FileOpen(job.log, "r", "UTF-8")
@@ -4044,7 +4499,6 @@ PollRemoveBgJob(*) {
         return
     }
 
-    ; CUDA 上下文损坏时：新开进程再跑一次（比同进程里硬扛 unknown error 更稳）
     cudaish := false
     try {
         if FileExist(job.log) {
@@ -4056,10 +4510,6 @@ PollRemoveBgJob(*) {
     }
     inP := job.in
     outP := job.out
-    modP := job.HasProp("model") ? job.model : ""
-    thrP := job.HasProp("thr") ? job.thr : ""
-    featherP := job.HasProp("feather") ? job.feather : ""
-    closeP := job.HasProp("close") ? job.close : ""
     REMOVE_BG_BUSY := false
     REMOVE_BG_PID := 0
     try FileDelete job.bat
@@ -4067,17 +4517,12 @@ PollRemoveBgJob(*) {
     REMOVE_BG_JOB := ""
     SetTimer(PollRemoveBgJob, 0)
 
-    if cudaish && REMOVE_BG_RETRY < 1 {
-        REMOVE_BG_RETRY += 1
-        EmitImageProcLog("[!] CUDA 异常，自动新开进程重试（1/1）…`n", false)
-        KillStaleRemoveBgPython()
-        Sleep 800
-        SetTimer(StartRemoveBg.Bind(inP, outP, modP, thrP, featherP, closeP), -200)
-        return
-    }
     REMOVE_BG_RETRY := 0
+    if cudaish
+        EmitImageProcLog("[!] CUDA 异常，可再点一次抠图`n", false)
     EmitImageProcLog("[X] 抠图失败 exit=" exitCode "`n", false)
     EmitImageProcResult(false, inP, outP, "exit=" exitCode)
+    KillStaleRemoveBgPython()
 }
 
 EmitRgReady(ok, err := "") {
@@ -4116,6 +4561,16 @@ FindLocalAria2c() {
             return p
     }
     return ""
+}
+
+; 浏览器头：站点对 aria2 默认 UA 常限速/拒绝；模拟 Chrome 多线程更快更稳
+Aria2BrowserUa() {
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+}
+Aria2BrowserHeaderArgs(referer := "") {
+    ; 与下载页共用完整浏览器头（含 Sec-Fetch / UA），并跟随重定向
+    ref := Trim(String(referer))
+    return DlAriaBrowserHeaderArgs(ref, ref != "")
 }
 
 ; url 可为字符串或数组。优先 aria2c，再 curl。minBytes 防错误页
@@ -4158,7 +4613,7 @@ DownloadFileToolProgress(urlOrUrls, dest, title := "下载组件", logToHome := 
             DirCreate destDir
         aria := FindLocalAria2c()
         curl := A_WinDir "\System32\curl.exe"
-        ua := "Mozilla/5.0"
+        ua := Aria2BrowserUa()
         minBytes := Max(1000, Integer(minBytes))
         idx := 0
         for url in urls {
@@ -4173,7 +4628,7 @@ DownloadFileToolProgress(urlOrUrls, dest, title := "下载组件", logToHome := 
             else
                 PushToolDownloadBoot(true, 8, title, "正在连接…")
             ok := false
-            ; ① aria2c（镜像多连接，直连单连接）
+            ; ① aria2c（浏览器头 + 多连接；直连 GitHub 少连接更稳）
             if aria != "" {
                 SplitPath dest, &destName
                 partName := destName ".part"
@@ -4181,12 +4636,15 @@ DownloadFileToolProgress(urlOrUrls, dest, title := "下载组件", logToHome := 
                 try FileDelete partPath
                 try FileDelete partPath ".aria2"
                 try FileDelete dest
-                conn := directGh ? 1 : 8
+                conn := directGh ? 4 : 16
+                ref := directGh ? "https://github.com/" : url
+                hdr := Aria2BrowserHeaderArgs(ref)
                 cmdFile := destDir "\_dl_aria_" A_TickCount ".cmd"
                 cmdBody := "@echo off`r`n"
-                    . '"' aria '" -c -x ' conn " -s " conn " -k 1M --connect-timeout=15 --timeout=" (directGh ? 40 : 120)
+                    . '"' aria '" -c -x ' conn " -s " conn " -k 1M --max-connection-per-server=" conn
+                    . " --connect-timeout=15 --timeout=" (directGh ? 40 : 120)
                     . " --max-tries=2 --file-allocation=none --allow-overwrite=true --auto-file-renaming=false"
-                    . " --check-certificate=false --user-agent=" ua " --referer=https://github.com/"
+                    . " --check-certificate=false" hdr
                     . ' -d "' destDir '" -o "' partName '" "' url '"`r`n'
                 try FileDelete cmdFile
                 FileAppend cmdBody, cmdFile, "CP0"
@@ -8845,6 +9303,115 @@ ExpandAhkEnvPath(s) {
     return s
 }
 
+; WebView 队列回调里 SetTimer/Run(explorer) 常无窗；改为写 open_path.request，由 PollShowRequest 主线程打开
+global UI_OPEN_LOCAL_PATH := ""
+RequestOpenLocalPath(p) {
+    global SEARCH_DIR
+    p := Trim(String(p), " `t`r`n")
+    p := StrReplace(p, "/", "\")
+    if p = ""
+        return
+    try p := ExpandAhkEnvPath(p)
+    p := Trim(String(p), " `t`r`n")
+    req := SEARCH_DIR "\open_path.request"
+    try {
+        if FileExist(req)
+            FileDelete(req)
+    } catch {
+    }
+    try {
+        ; 不写尾换行，避免 FileRead+Trim 默认不去掉 `n 导致 DirExist 失败
+        FileAppend p, req, "UTF-8"
+        AppLog("RequestOpenLocalPath queued p=" p)
+    } catch as e {
+        AppLog("RequestOpenLocalPath write fail " e.Message " p=" p)
+        ; 写文件失败时退回全局 + 直接打开（可能仍无效，但总比沉默好）
+        global UI_OPEN_LOCAL_PATH
+        UI_OPEN_LOCAL_PATH := p
+        try OpenLocalPathFromUi()
+    }
+}
+PollOpenPathRequest(*) {
+    global SEARCH_DIR, UI_OPEN_LOCAL_PATH
+    req := SEARCH_DIR "\open_path.request"
+    if !FileExist(req)
+        return
+    p := ""
+    try {
+        p := Trim(FileRead(req, "UTF-8"), " `t`r`n")
+        FileDelete(req)
+    } catch {
+        return
+    }
+    if p = ""
+        return
+    UI_OPEN_LOCAL_PATH := p
+    OpenLocalPathFromUi()
+}
+OpenLocalPathFromUi(*) {
+    global UI_OPEN_LOCAL_PATH
+    p := Trim(String(UI_OPEN_LOCAL_PATH), " `t`r`n")
+    UI_OPEN_LOCAL_PATH := ""
+    p := StrReplace(p, "/", "\")
+    if p = ""
+        return
+    try p := ExpandAhkEnvPath(p)
+    p := Trim(String(p), " `t`r`n")
+    ok := false
+    d := ""
+    sel := ""
+    if RegExMatch(p, "i)^[A-Za-z]:\\?$") {
+        d := StrUpper(SubStr(p, 1, 1)) ":\"
+    } else if DirExist(p) {
+        d := p
+    } else if FileExist(p) {
+        sel := p
+        SplitPath p, , &d
+    } else {
+        SplitPath p, , &d
+    }
+    if d = "" || !DirExist(d) {
+        AppLog("OpenLocalPathFromUi missing dir p=" p)
+        return
+    }
+    ; 1) ShellExecuteW（主线程最稳）
+    try {
+        if sel != "" {
+            r := DllCall("shell32\ShellExecuteW", "Ptr", 0, "Str", "open", "Str", "explorer.exe"
+                , "Str", '/select,"' sel '"', "Ptr", 0, "Int", 1, "Ptr")
+        } else {
+            r := DllCall("shell32\ShellExecuteW", "Ptr", 0, "Str", "explore", "Str", d
+                , "Ptr", 0, "Ptr", 0, "Int", 1, "Ptr")
+        }
+        if r > 32
+            ok := true
+    } catch as e {
+        AppLog("OpenLocalPathFromUi ShellExecute fail " e.Message)
+    }
+    ; 2) explorer.exe
+    if !ok {
+        try {
+            if sel != ""
+                Run('explorer.exe /select,"' sel '"')
+            else
+                Run('explorer.exe "' d '"')
+            ok := true
+        } catch as e2 {
+            AppLog("OpenLocalPathFromUi Run fail " e2.Message " d=" d)
+        }
+    }
+    ; 3) Shell.Application
+    if !ok {
+        try {
+            ComObject("Shell.Application").Explore(d)
+            ok := true
+        } catch as e3 {
+            AppLog("OpenLocalPathFromUi Explore fail " e3.Message " d=" d)
+        }
+    }
+    AppLog("OpenLocalPathFromUi ok=" ok " sel=" sel " d=" d)
+}
+
 EmitCfgIconResult(id, kind, path, url) {
     global wvCore
     if !IsObject(wvCore)
@@ -9260,23 +9827,10 @@ DispatchUiMsg(msg) {
         SetTimer(SaveImageProcScript.Bind(SubStr(msg, 21)), -1)
         return
     }
-    if SubStr(msg, 1, 13) = "openLocalPath|" {
-        p := Trim(SubStr(msg, 14))
-        if p != "" {
-            try {
-                if DirExist(p)
-                    Run('explorer.exe "' p '"')
-                else if FileExist(p)
-                    Run('explorer.exe /select,"' p '"')
-                else {
-                    SplitPath p, , &parent
-                    if DirExist(parent)
-                        Run('explorer.exe "' parent '"')
-                }
-            } catch as e {
-                AppLog("openLocalPath " e.Message)
-            }
-        }
+    ; "openLocalPath|" 共 14 字符；原先写成 13 导致永远匹配不上，下载页「打开目录」无反应
+    if SubStr(msg, 1, 14) = "openLocalPath|" {
+        ; 队列回调里 SetTimer 也不触发；写 open_path.request 由主线程 Poll 打开
+        RequestOpenLocalPath(SubStr(msg, 15))
         return
     }
     if SubStr(msg, 1, 16) = "imageProcRemove|" {
@@ -9301,6 +9855,34 @@ DispatchUiMsg(msg) {
         SetTimer(SaveImgProcResult.Bind(srcP, sugP), -1)
         return
     }
+    if SubStr(msg, 1, 18) = "imageProcCopyClip|" {
+        ; imageProcCopyClip|srcPath → 图片文件写入剪切板（CF_HDROP）
+        SetTimer(CopyImgProcToClipboard.Bind(SubStr(msg, 19)), -1)
+        return
+    }
+    if SubStr(msg, 1, 22) = "imageProcCopyClipData|" {
+        ; imageProcCopyClipData|<dataUrl> → 解码 PNG 后按文件写入剪切板
+        SetTimer(CopyImgProcDataUrlToClipboard.Bind(SubStr(msg, 23)), -1)
+        return
+    }
+    if SubStr(msg, 1, 17) = "imageProcCopyIco|" {
+        ; imageProcCopyIco|size|srcPath
+        rest := SubStr(msg, 18)
+        sep := InStr(rest, "|")
+        sz := sep ? Integer(SubStr(rest, 1, sep - 1)) : 32
+        srcP := sep ? SubStr(rest, sep + 1) : rest
+        SetTimer(CopyImgProcAsIco.Bind(srcP, sz), -1)
+        return
+    }
+    if SubStr(msg, 1, 21) = "imageProcCopyIcoData|" {
+        ; imageProcCopyIcoData|size|<dataUrl>  裁剪预览直达，不经 cache 回调
+        rest := SubStr(msg, 22)
+        sep := InStr(rest, "|")
+        sz := sep ? Integer(SubStr(rest, 1, sep - 1)) : 32
+        b64 := sep ? SubStr(rest, sep + 1) : rest
+        SetTimer(CopyImgProcAsIcoData.Bind(b64, sz), -1)
+        return
+    }
     if SubStr(msg, 1, 18) = "imageProcSaveData|" {
         ; imageProcSaveData|suggestPath|dataUrl
         rest := SubStr(msg, 19)
@@ -9313,6 +9895,21 @@ DispatchUiMsg(msg) {
     if SubStr(msg, 1, 18) = "imageProcCacheEdit|" {
         ; imageProcCacheEdit|<dataUrl> → 内部临时文件
         SetTimer(CacheEditPreview.Bind(SubStr(msg, 19)), -1)
+        return
+    }
+    if SubStr(msg, 1, 22) = "imageProcPersistSession|" {
+        ; 关闭前静默落盘内存图
+        PersistImgProcSessionPreview(SubStr(msg, 23))
+        return
+    }
+    if SubStr(msg, 1, 17) = "imageProcRestore|" {
+        ; imageProcRestore|inPath|outPath|state
+        rest := SubStr(msg, 18)
+        parts := StrSplit(rest, "|")
+        inP := parts.Length >= 1 ? parts[1] : ""
+        outP := parts.Length >= 2 ? parts[2] : ""
+        st := parts.Length >= 3 ? parts[3] : "idle"
+        SetTimer(EmitImageProcRestore.Bind(inP, outP, st), -1)
         return
     }
     if SubStr(msg, 1, 18) = "imageProcSetInput|" {
@@ -9341,6 +9938,12 @@ DispatchUiMsg(msg) {
         outP := SubStr(msg, 19)
         if FileExist(outP)
             try Run('explorer.exe /select,"' outP '"')
+        return
+    }
+    if SubStr(msg, 1, 17) = "imageProcDragOut|" {
+        ; imageProcDragOut|filePath  或  imageProcDragOut|data|<fileName>|<dataUrl>
+        ; 必须同步进入 DoDragDrop，才能带上鼠标缩略图拖到桌面/文件夹
+        StartImageProcDragOut(SubStr(msg, 18))
         return
     }
     if SubStr(msg, 1, 12) = "searchCancel" {
@@ -9562,34 +10165,11 @@ DispatchUiMsg(msg) {
         return
     }
     if SubStr(msg, 1, 9) = "openPath|" {
-        p := ExpandAhkEnvPath(SubStr(msg, 10))
-        p := Trim(p)
-        if p = ""
-            return
-        if RegExMatch(p, "i)^[A-Za-z]:\\?$") {
-            try Run('explorer.exe "' StrUpper(SubStr(p, 1, 1)) ':\"')
-            return
-        }
-        if DirExist(p) {
-            try Run('explorer.exe "' p '"')
-            return
-        }
-        if FileExist(p) {
-            try Run('explorer.exe /select,"' p '"')
-            return
-        }
-        ; 目录尚不存在时仍尝试打开父级
-        SplitPath p, , &parent
-        if parent != "" && DirExist(parent) {
-            try Run('explorer.exe "' parent '"')
-            return
-        }
-        try Run(p)
+        RequestOpenLocalPath(SubStr(msg, 10))
         return
     }
     if SubStr(msg, 1, 7) = "reveal|" {
-        p := ExpandAhkEnvPath(SubStr(msg, 8))
-        try Run('explorer.exe /select,"' p '"')
+        RequestOpenLocalPath(SubStr(msg, 8))
         return
     }
     if SubStr(msg, 1, 9) = "copyFile|" {
@@ -9635,6 +10215,514 @@ NotifyPathRemoved(path) {
         return
     js := "try{window.__removePath&&window.__removePath(" JStr(path) ")}catch(e){}"
     try wvCore.ExecuteScriptAsync(js)
+}
+
+; 判断缓冲区是否为 PNG 文件头（避免把 JPEG 字节误标成 PNG）
+IsPngBuffer(buf) {
+    if !IsObject(buf) || buf.Size < 8
+        return false
+    return NumGet(buf, 0, "UChar") = 0x89
+        && NumGet(buf, 1, "UChar") = 0x50
+        && NumGet(buf, 2, "UChar") = 0x4E
+        && NumGet(buf, 3, "UChar") = 0x47
+}
+
+; 用 GDI+ 把位图另存为临时 PNG（无损），返回路径；失败返回 ""
+SaveGdipBitmapAsPng(pBitmap, destPath) {
+    if !pBitmap || destPath = ""
+        return ""
+    ; image/png CLSID
+    clsid := Buffer(16, 0)
+    if DllCall("ole32\CLSIDFromString", "WStr", "{557CF406-1A04-11D3-9A73-0000F81EF32E}", "Ptr", clsid)
+        return ""
+    try FileDelete destPath
+    if DllCall("gdiplus\GdipSaveImageToFile", "UPtr", pBitmap, "WStr", destPath, "Ptr", clsid, "Ptr", 0)
+        return ""
+    return FileExist(destPath) ? destPath : ""
+}
+
+; 图片写入剪切板：优先 PNG（无损）+ CF_DIB；失败原因写入 lastClipImgErr
+global lastClipImgErr := ""
+SetClipboardImage(imgPath) {
+    global IMAGE_PROC_DIR, guiWin, lastClipImgErr
+    lastClipImgErr := ""
+    imgPath := Trim(String(imgPath))
+    if imgPath = "" || !FileExist(imgPath) {
+        lastClipImgErr := "文件不存在"
+        return false
+    }
+    ; 确保磁盘上是真 PNG（修之前可能写成带 BOM 的伪 PNG）
+    try EnsureFileIsPng(imgPath)
+
+    pngBuf := ""
+    try {
+        f := FileOpen(imgPath, "r", "UTF-8-RAW")
+        if IsObject(f) {
+            pngBuf := Buffer(f.Length)
+            f.RawRead(pngBuf)
+            f.Close()
+        }
+    }
+    if !IsPngBuffer(pngBuf)
+        pngBuf := ""
+
+    DllCall("LoadLibrary", "Str", "gdiplus.dll", "Ptr")
+    si := Buffer(24, 0)
+    NumPut("UInt", 1, si)
+    pToken := 0
+    DllCall("gdiplus\GdiplusStartup", "UPtr*", &pToken, "Ptr", si, "Ptr", 0)
+    if !pToken {
+        lastClipImgErr := "GdiplusStartup 失败"
+        return false
+    }
+
+    ok := false
+    pBitmap := 0, hBitmap := 0, hDib := 0, clipOpened := false
+    try {
+        if DllCall("gdiplus\GdipCreateBitmapFromFile", "WStr", imgPath, "UPtr*", &pBitmap) || !pBitmap {
+            lastClipImgErr := "无法解码图片"
+            return false
+        }
+
+        if !IsObject(pngBuf) || !pngBuf.Size {
+            try DirCreate IMAGE_PROC_DIR
+            tmpPng := IMAGE_PROC_DIR "\clip_encode_tmp.png"
+            if SaveGdipBitmapAsPng(pBitmap, tmpPng) != "" {
+                try {
+                    f2 := FileOpen(tmpPng, "r", "UTF-8-RAW")
+                    if IsObject(f2) {
+                        pngBuf := Buffer(f2.Length)
+                        f2.RawRead(pngBuf)
+                        f2.Close()
+                    }
+                }
+            }
+        }
+
+        DllCall("gdiplus\GdipCreateHBITMAPFromBitmap",
+            "UPtr", pBitmap, "UPtr*", &hBitmap, "UInt", 0xFFFFFFFF)
+        if !hBitmap {
+            lastClipImgErr := "HBITMAP 失败"
+            return false
+        }
+
+        bm := Buffer(32, 0)
+        DllCall("GetObject", "Ptr", hBitmap, "Int", bm.Size, "Ptr", bm)
+        w := NumGet(bm, 4, "Int"), h := NumGet(bm, 8, "Int")
+        if w < 1 || h < 1 {
+            lastClipImgErr := "尺寸无效"
+            return false
+        }
+        stride := ((w * 32 + 31) // 32) * 4
+        dibSize := 40 + stride * h
+        hDib := DllCall("GlobalAlloc", "UInt", 0x0002, "UPtr", dibSize, "Ptr")
+        if !hDib {
+            lastClipImgErr := "GlobalAlloc 失败"
+            return false
+        }
+        pDib := DllCall("GlobalLock", "Ptr", hDib, "Ptr")
+        DllCall("RtlZeroMemory", "Ptr", pDib, "UPtr", dibSize)
+        NumPut("UInt", 40, pDib, 0)
+        NumPut("Int", w, pDib, 4)
+        NumPut("Int", h, pDib, 8) ; GetDIBits 先用正高度
+        NumPut("UShort", 1, pDib, 12)
+        NumPut("UShort", 32, pDib, 14)
+        NumPut("UInt", 0, pDib, 16)
+        hdc := DllCall("GetDC", "Ptr", 0, "Ptr")
+        got := DllCall("GetDIBits", "Ptr", hdc, "Ptr", hBitmap, "UInt", 0, "UInt", h,
+            "Ptr", pDib + 40, "Ptr", pDib, "UInt", 0)
+        DllCall("ReleaseDC", "Ptr", 0, "Ptr", hdc)
+        NumPut("Int", -h, pDib, 8) ; 再标成自上而下，兼容更多应用
+        DllCall("GlobalUnlock", "Ptr", hDib)
+        if !got {
+            lastClipImgErr := "GetDIBits 失败"
+            return false
+        }
+
+        hwnd := 0
+        try hwnd := guiWin.Hwnd
+        loop 40 {
+            if DllCall("OpenClipboard", "Ptr", hwnd) {
+                clipOpened := true
+                break
+            }
+            Sleep 25
+        }
+        if !clipOpened {
+            lastClipImgErr := "剪切板被占用"
+            return false
+        }
+        DllCall("EmptyClipboard")
+
+        if IsPngBuffer(pngBuf) {
+            cfPng := DllCall("RegisterClipboardFormat", "Str", "PNG", "UInt")
+            hPng := DllCall("GlobalAlloc", "UInt", 0x0002, "UPtr", pngBuf.Size, "Ptr")
+            if hPng {
+                pPng := DllCall("GlobalLock", "Ptr", hPng, "Ptr")
+                DllCall("RtlMoveMemory", "Ptr", pPng, "Ptr", pngBuf, "UPtr", pngBuf.Size)
+                DllCall("GlobalUnlock", "Ptr", hPng)
+                if !DllCall("SetClipboardData", "UInt", cfPng, "Ptr", hPng)
+                    DllCall("GlobalFree", "Ptr", hPng)
+            }
+        }
+
+        if DllCall("SetClipboardData", "UInt", 8, "Ptr", hDib) { ; CF_DIB
+            hDib := 0 ; 所有权交给系统
+            ok := true
+        } else {
+            lastClipImgErr := "SetClipboardData(CF_DIB) 失败"
+        }
+        ; 再放一份 CF_BITMAP，兼容画图/部分 Office
+        if ok && hBitmap {
+            hBmCopy := DllCall("CopyImage", "Ptr", hBitmap, "UInt", 0, "Int", 0, "Int", 0, "UInt", 0x2008, "Ptr") ; LR_CREATEDIBSECTION
+            if hBmCopy {
+                if DllCall("SetClipboardData", "UInt", 2, "Ptr", hBmCopy) ; CF_BITMAP
+                    hBmCopy := 0
+                else
+                    try DllCall("DeleteObject", "Ptr", hBmCopy)
+            }
+        }
+    } finally {
+        if clipOpened
+            try DllCall("CloseClipboard")
+        if hDib
+            try DllCall("GlobalFree", "Ptr", hDib)
+        if hBitmap
+            try DllCall("DeleteObject", "Ptr", hBitmap)
+        if pBitmap
+            try DllCall("gdiplus\GdipDisposeImage", "UPtr", pBitmap)
+        if pToken
+            try DllCall("gdiplus\GdiplusShutdown", "UPtr", pToken)
+    }
+    return ok
+}
+
+; ── 修图区：拖文件到桌面/资源管理器（CF_HDROP + 缩略图）────────────────
+AllocHDropMemory(paths) {
+    if !IsObject(paths) || paths.Length < 1
+        return 0
+    uniq := []
+    seen := Map()
+    for p in paths {
+        p := String(p)
+        key := StrLower(p)
+        if p = "" || seen.Has(key)
+            continue
+        if !FileExist(p)
+            return 0
+        seen[key] := true
+        uniq.Push(p)
+    }
+    if uniq.Length < 1
+        return 0
+    totalChars := 1
+    for p in uniq
+        totalChars += StrLen(p) + 1
+    offset := 20
+    bufSize := offset + totalChars * 2
+    hMem := DllCall("GlobalAlloc", "UInt", 0x0002, "UPtr", bufSize, "Ptr") ; GMEM_MOVEABLE
+    if !hMem
+        return 0
+    ptr := DllCall("GlobalLock", "Ptr", hMem, "Ptr")
+    if !ptr {
+        DllCall("GlobalFree", "Ptr", hMem)
+        return 0
+    }
+    DllCall("RtlZeroMemory", "Ptr", ptr, "UPtr", bufSize)
+    NumPut("UInt", offset, ptr, 0)   ; pFiles
+    NumPut("Int", 0, ptr, 4)         ; pt.x
+    NumPut("Int", 0, ptr, 8)         ; pt.y
+    NumPut("UInt", 0, ptr, 12)       ; fNC
+    NumPut("UInt", 1, ptr, 16)       ; fWide
+    pos := offset
+    for p in uniq {
+        StrPut(p, ptr + pos, "UTF-16")
+        pos += (StrLen(p) + 1) * 2
+    }
+    DllCall("GlobalUnlock", "Ptr", hMem)
+    return hMem
+}
+
+CreateDragThumbHBitmap(imgPath, maxSide := 128) {
+    imgPath := Trim(String(imgPath))
+    if imgPath = "" || !FileExist(imgPath)
+        return 0
+    DllCall("LoadLibrary", "Str", "gdiplus.dll", "Ptr")
+    si := Buffer(24, 0)
+    NumPut("UInt", 1, si)
+    pToken := 0
+    DllCall("gdiplus\GdiplusStartup", "UPtr*", &pToken, "Ptr", si, "Ptr", 0)
+    if !pToken
+        return 0
+    hbm := 0
+    pBitmap := 0
+    pThumb := 0
+    try {
+        if DllCall("gdiplus\GdipCreateBitmapFromFile", "WStr", imgPath, "UPtr*", &pBitmap) || !pBitmap
+            return 0
+        w := 0, h := 0
+        DllCall("gdiplus\GdipGetImageWidth", "UPtr", pBitmap, "UInt*", &w)
+        DllCall("gdiplus\GdipGetImageHeight", "UPtr", pBitmap, "UInt*", &h)
+        if w < 1 || h < 1
+            return 0
+        scale := Min(1.0, maxSide / Max(w, h))
+        tw := Max(1, Integer(Round(w * scale)))
+        th := Max(1, Integer(Round(h * scale)))
+        if DllCall("gdiplus\GdipGetImageThumbnail", "UPtr", pBitmap, "UInt", tw, "UInt", th, "UPtr*", &pThumb, "Ptr", 0, "Ptr", 0) || !pThumb {
+            pThumb := 0
+            DllCall("gdiplus\GdipCreateHBITMAPFromBitmap", "UPtr", pBitmap, "Ptr*", &hbm, "UInt", 0xFFFFFFFF)
+        } else {
+            DllCall("gdiplus\GdipCreateHBITMAPFromBitmap", "UPtr", pThumb, "Ptr*", &hbm, "UInt", 0xFFFFFFFF)
+        }
+    } finally {
+        if pThumb
+            try DllCall("gdiplus\GdipDisposeImage", "UPtr", pThumb)
+        if pBitmap
+            try DllCall("gdiplus\GdipDisposeImage", "UPtr", pBitmap)
+        if pToken
+            try DllCall("gdiplus\GdiplusShutdown", "UPtr", pToken)
+    }
+    return hbm
+}
+
+AttachDragImageToDataObject(pDataObj, imgPath) {
+    if !pDataObj || imgPath = "" || !FileExist(imgPath)
+        return false
+    hbm := CreateDragThumbHBitmap(imgPath, 128)
+    if !hbm
+        return false
+    ; SHDRAGIMAGE: SIZE(8) + POINT(8) + HBITMAP + COLORREF
+    shdi := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+    bm := Buffer(32, 0) ; BITMAP
+    if DllCall("GetObject", "Ptr", hbm, "Int", bm.Size, "Ptr", bm) {
+        bw := NumGet(bm, 4, "Int")
+        bh := NumGet(bm, 8, "Int")
+    } else {
+        bw := 128, bh := 128
+    }
+    NumPut("Int", bw, shdi, 0)          ; size.cx
+    NumPut("Int", bh, shdi, 4)          ; size.cy
+    NumPut("Int", bw // 2, shdi, 8)     ; pt.x 热点
+    NumPut("Int", 8, shdi, 12)          ; pt.y
+    NumPut("Ptr", hbm, shdi, 16)        ; hbmpDragImage
+    NumPut("UInt", 0xFFFFFFFF, shdi, 16 + A_PtrSize) ; crColorKey
+    try {
+        dsh := ComObject("{4657278A-411B-11d2-839A-00C04FD918D1}", "{DE5BF786-477A-11d2-839D-00C04FD918D1}")
+        hr := ComCall(3, dsh, "ptr", shdi, "ptr", pDataObj) ; InitializeFromBitmap
+        if hr != 0 {
+            try DllCall("DeleteObject", "Ptr", hbm)
+            return false
+        }
+        ; 成功后由 DragSourceHelper 持有 hbmp，勿 DeleteObject
+        return true
+    } catch {
+        try DllCall("DeleteObject", "Ptr", hbm)
+        return false
+    }
+}
+
+; 从真实文件路径拿到 Shell 的 IDataObject（含 CF_HDROP / 缩略图能力）
+CreateShellDataObjectFromFile(path) {
+    path := Trim(String(path))
+    if path = "" || !FileExist(path)
+        return 0
+    iidItem := Buffer(16, 0)
+    if DllCall("ole32\CLSIDFromString", "WStr", "{43826d1e-e718-42ee-bc55-a1e261c37bfe}", "Ptr", iidItem)
+        return 0
+    psi := 0
+    hr := DllCall("shell32\SHCreateItemFromParsingName", "WStr", path, "Ptr", 0, "Ptr", iidItem, "Ptr*", &psi, "UInt")
+    if hr || !psi
+        return 0
+    bhid := Buffer(16, 0)
+    iidData := Buffer(16, 0)
+    if DllCall("ole32\CLSIDFromString", "WStr", "{B8C0BD9F-ED24-455c-83E6-D5390C4FE8C4}", "Ptr", bhid)
+        || DllCall("ole32\CLSIDFromString", "WStr", "{0000010e-0000-0000-C000-000000000046}", "Ptr", iidData) {
+        ObjRelease(psi)
+        return 0
+    }
+    pDataObj := 0
+    ; IShellItem::BindToHandler(0, BHID_DataObject, IID_IDataObject, ...)
+    hr := ComCall(3, psi, "Ptr", 0, "Ptr", bhid, "Ptr", iidData, "Ptr*", &pDataObj)
+    ObjRelease(psi)
+    if hr || !pDataObj
+        return 0
+    return pDataObj
+}
+
+DoShellFileDragDrop(paths, thumbPath := "") {
+    global guiWin
+    if !IsObject(paths) || paths.Length < 1
+        return false
+    path := String(paths[1])
+    if path = "" || !FileExist(path)
+        return false
+    DllCall("ole32\OleInitialize", "Ptr", 0)
+    ; 优先 Shell Item 数据对象（资源管理器认、自带图标/缩略图）
+    pDataObj := CreateShellDataObjectFromFile(path)
+    if !pDataObj {
+        ; 回退：手工 CF_HDROP
+        hDrop := AllocHDropMemory([path])
+        if !hDrop
+            return false
+        iid := Buffer(16, 0)
+        if DllCall("ole32\CLSIDFromString", "WStr", "{0000010e-0000-0000-C000-000000000046}", "Ptr", iid) {
+            DllCall("GlobalFree", "Ptr", hDrop)
+            return false
+        }
+        hr := DllCall("shell32\SHCreateDataObject", "Ptr", 0, "UInt", 0, "Ptr", 0, "Ptr", 0, "Ptr", iid, "Ptr*", &pDataObj, "UInt")
+        if hr || !pDataObj {
+            DllCall("GlobalFree", "Ptr", hDrop)
+            return false
+        }
+        fmt := Buffer(A_PtrSize = 8 ? 32 : 20, 0)
+        NumPut("UShort", 15, fmt, 0)
+        NumPut("UInt", 1, fmt, A_PtrSize = 8 ? 16 : 8)
+        NumPut("Int", -1, fmt, A_PtrSize = 8 ? 20 : 12)
+        NumPut("UInt", 1, fmt, A_PtrSize = 8 ? 24 : 16)
+        stg := Buffer(A_PtrSize = 8 ? 24 : 12, 0)
+        NumPut("UInt", 1, stg, 0)
+        NumPut("Ptr", hDrop, stg, A_PtrSize = 8 ? 8 : 4)
+        if ComCall(7, pDataObj, "Ptr", fmt, "Ptr", stg, "Int", 1) != 0 {
+            try ObjRelease(pDataObj)
+            DllCall("GlobalFree", "Ptr", hDrop)
+            return false
+        }
+    }
+    thumb := thumbPath != "" ? thumbPath : path
+    try AttachDragImageToDataObject(pDataObj, thumb)
+    hwnd := 0
+    try {
+        if IsObject(guiWin)
+            hwnd := guiWin.Hwnd
+    }
+    effect := 0
+    ; DROPEFFECT_COPY|MOVE = 1|2；pdsrc=0 用系统默认源
+    hr := DllCall("shell32\SHDoDragDrop", "Ptr", hwnd, "Ptr", pDataObj, "Ptr", 0, "UInt", 1 | 2, "UInt*", &effect, "UInt")
+    try ObjRelease(pDataObj)
+    ; DRAGDROP_S_DROP=0x00040100 / CANCEL=0x00040101
+    ok := (hr = 0x00040100)
+    try EmitImageProcLog(ok ? "[√] 已拖出到目标`n" : "[i] 拖放已取消或未落到文件夹`n", false)
+    return ok
+}
+
+StartImageProcDragOut(payload) {
+    global IMAGE_PROC_DIR
+    payload := String(payload)
+    EmitImageProcLog("[*] 开始拖出图片…`n", false)
+    filePath := ""
+    if SubStr(payload, 1, 5) = "data|" {
+        ; 大图 dataURL 经 postMessage 易失败/太慢；应优先走文件路径
+        rest := SubStr(payload, 6)
+        sep := InStr(rest, "|")
+        name := sep ? SubStr(rest, 1, sep - 1) : "export.png"
+        dataUrl := sep ? SubStr(rest, sep + 1) : ""
+        name := RegExReplace(String(name), '[\\/:*?"<>|]+', "_")
+        if name = "" || !RegExMatch(name, "i)\.(png|jpe?g|webp|gif|bmp)$")
+            name := "export.png"
+        try DirCreate IMAGE_PROC_DIR
+        filePath := IMAGE_PROC_DIR "\drag_" name
+        if !WritePngFromB64(dataUrl, filePath) {
+            b64 := dataUrl
+            if RegExMatch(dataUrl, "i)^data:image/[^;]+;base64,(.+)$", &m)
+                b64 := m[1]
+            b64 := RegExReplace(b64, "\s+")
+            try {
+                size := 0
+                if !DllCall("crypt32\CryptStringToBinaryW", "WStr", b64, "UInt", 0, "UInt", 1, "Ptr", 0, "UInt*", &size, "Ptr", 0, "Ptr", 0)
+                    || size < 1 {
+                    EmitImageProcLog("[X] 拖出失败：无法解码图片`n", false)
+                    return
+                }
+                buf := Buffer(size)
+                if !DllCall("crypt32\CryptStringToBinaryW", "WStr", b64, "UInt", 0, "UInt", 1, "Ptr", buf, "UInt*", &size, "Ptr", 0, "Ptr", 0) {
+                    EmitImageProcLog("[X] 拖出失败：解码错误`n", false)
+                    return
+                }
+                if !WriteBinaryFile(filePath, buf, size) {
+                    EmitImageProcLog("[X] 拖出失败：写临时文件`n", false)
+                    return
+                }
+            } catch {
+                EmitImageProcLog("[X] 拖出失败`n", false)
+                return
+            }
+        }
+    } else {
+        filePath := Trim(payload)
+    }
+    if filePath = "" || !FileExist(filePath) {
+        EmitImageProcLog("[X] 拖出失败：文件不存在`n", false)
+        return
+    }
+    ; 已有真实文件时跳过耗时转码，抢在鼠标松开前进入 OLE 拖放
+    if !RegExMatch(StrLower(filePath), "i)\.png$") {
+        try EnsureFileIsPng(filePath)
+    }
+    ; 等物理左键（WebView 消息有延迟）；仍没有则粘贴板文件兜底
+    btnDown := false
+    loop 50 {
+        if (DllCall("GetAsyncKeyState", "Int", 0x01, "Short") & 0x8000) {
+            btnDown := true
+            break
+        }
+        Sleep 8
+    }
+    if !btnDown {
+        if SetClipboardFiles([filePath]) {
+            EmitImageProcLog("[i] 已复制文件到剪切板：请在桌面/文件夹 Ctrl+V 粘贴`n", false)
+            global wvCore
+            if IsObject(wvCore) {
+                js := "try{window.__imageProcDragFallback&&window.__imageProcDragFallback(" JStr(filePath) ")}catch(e){}"
+                try wvCore.ExecuteScriptAsync(js)
+            }
+        } else
+            EmitImageProcLog("[X] 拖出失败：鼠标已松开且无法写入剪切板`n", false)
+        return
+    }
+    DoShellFileDragDrop([filePath], filePath)
+}
+
+; 在已打开/已有内容的剪切板上追加 CF_HDROP（不 EmptyClipboard，保留图像预览）
+AppendClipboardFiles(paths) {
+    if !IsObject(paths) || paths.Length < 1
+        return false
+    hMem := AllocHDropMemory(paths)
+    if !hMem
+        return false
+    hwnd := 0
+    try hwnd := guiWin.Hwnd
+    opened := false
+    loop 20 {
+        if DllCall("OpenClipboard", "Ptr", hwnd) {
+            opened := true
+            break
+        }
+        Sleep 15
+    }
+    if !opened {
+        DllCall("GlobalFree", "Ptr", hMem)
+        return false
+    }
+    ok := DllCall("SetClipboardData", "UInt", 15, "Ptr", hMem) ; CF_HDROP（不 Empty，保留 PNG/DIB 预览）
+    if ok {
+        hEffect := DllCall("GlobalAlloc", "UInt", 0x0002, "UPtr", 4, "Ptr")
+        if hEffect {
+            pEff := DllCall("GlobalLock", "Ptr", hEffect, "Ptr")
+            if pEff {
+                NumPut("UInt", 5, pEff, 0) ; DROPEFFECT_COPY|MOVE
+                DllCall("GlobalUnlock", "Ptr", hEffect)
+                fmtEffect := DllCall("RegisterClipboardFormat", "Str", "Preferred DropEffect", "UInt")
+                if fmtEffect
+                    DllCall("SetClipboardData", "UInt", fmtEffect, "Ptr", hEffect)
+                else
+                    DllCall("GlobalFree", "Ptr", hEffect)
+            } else
+                DllCall("GlobalFree", "Ptr", hEffect)
+        }
+    } else
+        DllCall("GlobalFree", "Ptr", hMem)
+    DllCall("CloseClipboard")
+    return !!ok
 }
 
 ; Put file/folder paths on clipboard as CF_HDROP (Explorer paste)
