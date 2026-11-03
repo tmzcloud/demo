@@ -87,24 +87,38 @@ function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 100
     function Clear-Out {
         if (Test-Path -LiteralPath $outPath) { Remove-Item -LiteralPath $outPath -Force -ErrorAction SilentlyContinue }
     }
-    # 下载器：先 WebClient，再 IWR，最后 curl（curl 在部分环境失败率高）
+    # 下载器：先短超时 HttpWebRequest(15s)，再 IWR(25s)，最后 curl(25s)；失败快切下一方式/镜像
     $downloaders = @(
         @{
             Name = 'WebClient'
             Call = {
                 param($url, $dest)
-                $wc = New-Object System.Net.WebClient
+                $req = [System.Net.HttpWebRequest]::Create($url)
+                $req.Method = 'GET'
+                $req.UserAgent = 'Mozilla/5.0 init-download'
+                $req.Timeout = 15000
+                $req.ReadWriteTimeout = 15000
+                $req.AllowAutoRedirect = $true
+                $resp = $null
+                $fs = $null
+                $rs = $null
                 try {
-                    $wc.Headers.Add('User-Agent', 'Mozilla/5.0 init-download')
-                    $wc.DownloadFile($url, $dest)
-                } finally { $wc.Dispose() }
+                    $resp = $req.GetResponse()
+                    $rs = $resp.GetResponseStream()
+                    $fs = [IO.File]::Create($dest)
+                    $rs.CopyTo($fs)
+                } finally {
+                    if ($fs) { $fs.Dispose() }
+                    if ($rs) { $rs.Dispose() }
+                    if ($resp) { $resp.Dispose() }
+                }
             }
         },
         @{
             Name = 'IWR'
             Call = {
                 param($url, $dest)
-                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 180
+                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 25
             }
         },
         @{
@@ -112,7 +126,7 @@ function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 100
             Call = {
                 param($url, $dest)
                 if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { throw 'curl.exe not found' }
-                & curl.exe -fsSL --connect-timeout 20 --max-time 180 -o $dest -- $url
+                & curl.exe -fsSL --connect-timeout 8 --max-time 25 -o $dest -- $url
                 if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
             }
         }

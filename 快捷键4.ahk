@@ -621,15 +621,14 @@ class outDependData {
 
     ;配置 / 扩展脚本同步（base64 在本脚本末尾注释块）
     ;包裹标记：;########################################################################################################### 文件名
-    ;- 配置 txt：仅缺失时从注释块吐出（绝不回写主脚本，避免运行中整文件改写导致体积骤变/内容损坏）
-    ;- *.ahk：缺失则吐出；两边都有且不同 → 按 mtime，主脚本较新则覆盖磁盘，磁盘较新则回写注释块
+    ;- 配置 txt / *.ahk：缺失则吐出；两边都有且不同 → 按 mtime，主脚本较新则覆盖磁盘，磁盘较新则回写注释块
     ;- ahk_ext 根目录 *.ahk：磁盘 ∪ 注释块自动识别
     static _syncConfigs() {
         helpmeHome := reg.getEnv(init.helpmeEnv)
         if helpmeHome != "" {
             configDir := helpmeHome . "\" . init.configDir
             for name in ["getconfig.txt", "runconfig.txt", "sysconfig.txt"]
-                outDependData._syncOneFile(name, configDir "\" name, false) ; 配置禁止回写主脚本
+                outDependData._syncOneFile(name, configDir "\" name, true) ; 配置与 ahk 一样允许回写主脚本
         }
         extDir := A_ScriptDir "\ahk_ext"
         seen := Map()
@@ -687,7 +686,7 @@ class outDependData {
         return tags
     }
 
-    ; allowWriteBack：false=只吐出不回写主脚本（配置）；true=允许 ahk 双向
+    ; allowWriteBack：true=双向（配置 / ahk）；false=只吐出不回写
     static _syncOneFile(tag, filePath, allowWriteBack := true) {
         SplitPath filePath, , &dir
         if dir != "" && !DirExist(dir)
@@ -697,7 +696,7 @@ class outDependData {
         hasB64 := (curB64 != "" && curB64 != "xxxxx")
         if hasFile && hasB64 {
             if !allowWriteBack
-                return ; 配置已存在：尊重磁盘，绝不改 快捷键4.ahk
+                return
             diskB64 := outDependData._encodeFileToBase64(filePath)
             if diskB64 = "" || diskB64 = curB64
                 return
@@ -705,7 +704,7 @@ class outDependData {
             fileTime := ""
             try scriptTime := FileGetTime(A_ScriptFullPath, "M")
             try fileTime := FileGetTime(filePath, "M")
-            ; 主脚本不旧于磁盘 → 吐出覆盖（新下载不被旧扩展污染）
+            ; 主脚本不旧于磁盘 → 吐出覆盖（新下载不被旧文件污染）
             if scriptTime != "" && fileTime != "" && scriptTime >= fileTime {
                 try ak.createFileByBase64(curB64, filePath)
                 catch as e
