@@ -742,60 +742,9 @@ class outDependData {
         f.Close()
     }
 
-    ; 快捷键4.ahk ↔ init.txt 双向：仅当同目录存在 init.txt/init.ps1/init 时
-    ; 把当前脚本编码进 $ahk_kjj4_script_A22222，供离线搭建（init 不再依赖外网拉脚本）
+    ; init.txt 改为镜像拉取 快捷键4.ahk，不再把整脚本 Base64 写回 init（会膨胀到数 MB）
     static _updateInitScriptAhkBase64() {
-        base64Data := ak.getBase64(A_ScriptFullPath)
-        if (base64Data = "")
-            return
-        targetPath := ""
-        ; 优先 init.txt；没有则兼容旧名；都不存在则完全不做
-        for filePath in [A_ScriptDir "\init.txt", A_ScriptDir "\init.ps1", A_ScriptDir "\init"] {
-            if FileExist(filePath) {
-                targetPath := filePath
-                break
-            }
-        }
-        if (targetPath = "")
-            return
-        try content := FileRead(targetPath, "UTF-8")
-        catch
-            return
-        targetVar := "$ahk_kjj4_script_A22222"
-        ; PowerShell 单引号赋值，避免 $ 等字符被展开
-        assign := targetVar " = '" base64Data "'"
-        newContent := ""
-        if p := InStr(content, targetVar) {
-            lineEnd := InStr(content, "`n", false, p)
-            if !lineEnd
-                lineEnd := StrLen(content) + 1
-            oldLine := SubStr(content, p, lineEnd - p)
-            ; 已是最新则跳过写盘（init 可达 8MB+）
-            if InStr(oldLine, base64Data)
-                return
-            newContent := SubStr(content, 1, p - 1) . assign . SubStr(content, lineEnd)
-        } else {
-            insert := "`n" assign "`n"
-            if p := InStr(content, "$ahk2_bin_zip_A11111") {
-                lineEnd := InStr(content, "`n", false, p)
-                if !lineEnd
-                    lineEnd := StrLen(content) + 1
-                newContent := SubStr(content, 1, lineEnd) . insert . SubStr(content, lineEnd + 1)
-            } else {
-                newContent := assign "`n`n" content
-            }
-        }
-        if newContent = "" || newContent = content
-            return
-        try {
-            if FileExist(targetPath)
-                FileDelete targetPath
-            f := FileOpen(targetPath, "w", "UTF-8")
-            f.Write(newContent)
-            f.Close()
-        } catch Error as err {
-            OutputDebug("_updateInitScriptAhkBase64 write fail: " err.Message "`n")
-        }
+        return
     }
 }
 ;[@getIco-CB747C07A3FB4A31B5FCBE475DE40C85]
@@ -4980,7 +4929,7 @@ class ak{
 ;########################################################################################################### runconfig.txt
 
 ;########################################################################################################### sysconfig.txt
-;IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMNCiMgYWhr55qE44CQ57O757uf5Y+C5pWw6YWN572u44CRDQojIOmAmui/h2tleeWSjHZhbHVl55qE5b2i5byP77yM5L+u5pS55YC85ZCO5LiA6Iis5LiN6ZyA6KaB6YeN5ZCv6YO96IO955Sf5pWI77yM5L6L5aaCdG91Y2jlkb3ku6Tmr4/mrKHpg73kvJror7vlj5bov5nkuKrmlofku7YNCiMg5YC85Y+v5Lul5piv5pWw57uE55SoWyBdIOS7o+ihqOaVsOe7hA0KIyAnIyfku6Pooajms6jph4oNCiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjDQoNCg0KIyMjIyMjIyMjIyMj44CQY21kIOacjeWKoeWZqOOAkQ0KY21kY29ubmVjdD1vZmYNCmNtZG5hbWU9Y21kMQ0KY21kc2VydmVyPXRtemNsb3VkLmNuDQpjbWRzZXJ2ZXJwb3J0PTg4NDgNCg0KIyMjIyMjIyMjIyMj44CQdG91Y2jphY3nva7nsbvlnovlr7nlupTnmoTmiZPlvIDmlrnlvI/vvIzlpJrkuKrnlKjnsbvlnovnlKgnW10n5Lit6Ze055So6YCX5Y+35YiG6ZqU77yM5aaC5p6c5rKh5pyJ6YWN572u5a+55bqU55qE5omT5byA57G75Z6L6YKj5LmI5bCx55So6buY6K6k5omT5byA5pa55byP44CRDQpub3RlcGFkPVsudHh0LCAuYmF0LCAuY21kLCAudmJzLCAuYWhrXQ0Kc3VibGltZSBUZXh0Kj1bLmMsIC5jKyssIC5wYWNdDQppbnRlbGxpSiBJZGVhKj1bLmphdmEsIC54bWwgLC5odG1sLCAuanNvbiwuc3FsXQ0KDQojIyMjIyMjIyMjIyPjgJDphY3nva7mkJzni5fnv7vor5HnmoTmmL7npLrnlYzpnaLjgJENCnRyYW5zX2xpbmVfY29sb3I9IzBhZjU5Yg0KdHJhbnNfaHRtbF9zY2FsYT0wLjc1DQoj6YWN572u5pCc54uXb2Ny55qE57uT5p6c5pi+56S6572R6aG15aSn5bCPDQpvY3JfbGluZV9jb2xvcj0jMGFmNTliDQojb2NyX2h0bWxfc2NhbGE9MC42NCAgICPlvIPnlKgNCm9jcl9odG1sX3NjYWxhPTAuNjgNCg0KIyMjIyMjIyMjIyMj44CQ6YWN572u5bGP6JS9Y3RybCtzaGlmdCtV77yI6L2s5o2i5a2X56ym5Liy5aSn5bCP5YaZ77yJ44CRDQpub191cGxvd19zdHJpbmdfZXhlPVtpZGVhNjQuZXhlLENvZGUuZXhlLGdvbGFuZDY0LmV4ZSxkYXRhZ3JpcDY0LmV4ZV0NCm5vX2NvcHlfbGluZV9leGU9W2lkZWE2NC5leGUsQ29kZS5leGUsZ29sYW5kNjQuZXhlLGRhdGFncmlwNjQuZXhlXQ0KDQojIyMjIyMjIyMjIyPjgJDpvKDmoIfkuK3plK7mkJzntKLjgJENCm1idXR0b25fc2VhcmNoPW9mZg0KaWdub3JlX3Byb2Nlc3M9W2lkZWE2NC5leGUsQ29kZS5leGUsZ29sYW5kNjQuZXhlLHN1YmxpbWVfdGV4dC5leGUsZGF0YWdyaXA2NC5leGVdDQpicm93c2VyX2xpc3Q9W2Nocm9tZS5leGUgLCBtc2VkZ2UuZXhlICwgZmlyZWZveC5leGVdDQpkZWZhdWx0X3NlYXJjaF9lbmdpbmU9aHR0cHM6Ly93d3cuYmFpZHUuY29tL3M/d2Q9DQoNCiMjIyMjIyMjIyMjI+OAkOmFjee9rmhvc3TnmoRpcHbmmKDlsITjgJENCm5ldGlwdjY9b2ZmDQpuZXR1cmw9aHR0cDovL3d3dy50bXpjbG91ZC5jbi9pcHY2DQpob3N0bmFtZT10bXpjbG91ZC5jbg0KDQojIyMjIyMjIyMjIyPjgJBiaW5n5aOB57q444CRDQpiaW5nX3dhbGxwYXBlcj1vZmYNCg0KIyMjIyMjIyMjIyMj44CQ8J+Su+W3peS9nOi9r+S7tuWRveS7pHdvcmvjgJENCndvcmtfbGlzdD1bIHd4LCBnb2xhbmQsIGdyaXAsIG9uZW5vdGUsIGFwaWZveCAsc2xhY2sgLGN1cnNvcixvcGVudnBuIO+8jGRhdGFncmlwXQ0KDQojIyMjIyMjIyMjIyPjgJBwb3dlcnNoZWxsIOiEmuacrOOAkQ0KI+aQnOe0ouaWh+acrA0KOjo/c3N8JDE9ZmluZHN0ciAvcyAvaSAvbSAiJDEiICouKg0KI+iOt+WPlg0KOjo/Z2V0cG9ydHwkMT1HZXQtTmV0VENQQ29ubmVjdGlvbiAtTG9jYWxQb3J0ICQxIC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlIHwgRm9yRWFjaC1PYmplY3QgeyAkcCA9IEdldC1Qcm9jZXNzIC1JZCAkXy5Pd25pbmdQcm9jZXNzIC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlOyBbUFNDdXN0b21PYmplY3RdQHsgTG9jYWxQb3J0ID0gJF8uTG9jYWxQb3J0OyBQSUQgPSAkXy5Pd25pbmdQcm9jZXNzOyBQcm9jZXNzTmFtZSA9ICRwLlByb2Nlc3NOYW1lOyBFeGVjdXRhYmxlUGF0aCA9ICRwLlBhdGggfSB9IHwgRm9ybWF0LVRhYmxlIC1BdXRvU2l6ZQ0KOjo/Z2V0ZmlsZXwkMT1pZiAoIShUZXN0LVBhdGggIiRlbnY6VEVNUFxoYW5kbGU2NC5leGUiKSkgeyBJbnZva2UtV2ViUmVxdWVzdCAtVXJpICJodHRwczovL2xpdmUuc3lzaW50ZXJuYWxzLmNvbS9oYW5kbGU2NC5leGUiIC1PdXRGaWxlICIkZW52OlRFTVBcaGFuZGxlNjQuZXhlIiAtVXNlQmFzaWNQYXJzaW5nIH07ICYgIiRlbnY6VEVNUFxoYW5kbGU2NC5leGUiIC1ub2Jhbm5lciAtYSAiJDEiDQoNCiMjIyMjIyMjIyMjI+OAkOeDreWtl+espuS4suaYoOWwhOOAkQ0KI+eUqOS6jueUn+aIkOm7mOiupOeahHV1aWQNCjo6P3V1aWQ9MGQ2Y2RiMDctZjA1OC00YzQ0LTljNzMtZDY5Zjg3NzA4OWMwDQo6Oj8yND0yNDFlNjFiYy1hMzIxLTQ0ZmItYjEwYi01Nzc0YzEwZDU3ZDMNCjo6P3NzMj1oYXM6bGluaw0KOjo/dGVzdDAwMT1vaw0KDQojIyMjIyMjIyMjIyPjgJBwc3Fs5pWw5o2u5bqT5pON5L2c44CRDQo6Oj9tZXJjaGFudD1zZWxlY3QgKiBmcm9tIG1lcmNoYW50Lm1lcmNoYW50ICB3aGVyZSBtZXJjaGFudF9pZCAgPSd4eHh4eCc7DQo6Oj9sb2NhdGlvbj1zZWxlY3QgKiBmcm9tIG1lcmNoYW50LmxvY2F0aW9uICAgd2hlcmUgbWVyY2hhbnRfaWQgID0neHh4eHgnOw0KOjo/bG9jYXRpb24yPXNlbGVjdCAqIGZyb20gbWVyY2hhbnQubG9jYXRpb24gICB3aGVyZSBsb2NhdGlvbl9pZCAgPSd4eHh4eCc7DQo6Oj90b2tlbj1zZWxlY3QgKiBmcm9tIG1hcHBpbmcudG9rZW5fdGhpcmRwYXJ0eSB0dCAgd2hlcmUgdHQubWVyY2hhbnRfaWQgPSd4eHh4eCc7DQo6Oj90b2tlbjI9c2VsZWN0ICogZnJvbSBtYXBwaW5nLnRva2VuX3RoaXJkcGFydHkgdHQgIHdoZXJlIHR0LmxvY2F0aW9uX2lkID0neHh4eHgnOw0KOjo/aXRlbT1zZWxlY3QgKmZyb20gY2F0YWxvZ3MuaXRlbSAgd2hlcmUgaWQgPSd4eHh4eCcgOw0KOjo/aXRlbTI9c2VsZWN0ICpmcm9tIGNhdGFsb2dzLml0ZW0gIHdoZXJlIHRpdGxlID0neHh4eHgnIDsNCjo6P3ZydD1zZWxlY3QgKiBmcm9tIGNhdGFsb2dzLnZhcmlhdGlvbiB3aGVyZSBpZD0neHh4eHgnOw0KOjo/dnJ0Mj1zZWxlY3QgKiBmcm9tIGNhdGFsb2dzLnZhcmlhdGlvbiB3aGVyZSBpdGVtX2lkPSd4eHh4eCc7DQo6Oj9tZHNldD1zZWxlY3QgKmZyb20gY2F0YWxvZ3MubW9kaWZpZXJfc2V0IHdoZXJlIGlkID0neHh4eHgnIDsNCjo6P21vZGlmaWVyPXNlbGVjdCAqZnJvbSBjYXRhbG9ncy5tb2RpZmllciB3aGVyZSBpZCA9J3h4eHh4JyA7DQo6Oj9tb2RpZmllcjI9c2VsZWN0ICpmcm9tIGNhdGFsb2dzLm1vZGlmaWVyIHdoZXJlIG1vZGlmaWVyX3NldF9pZCA9J3h4eHh4JyA7DQo6Oj9iZD1iZDJiMDA0MS0xYTZkLTRiOTEtYmUwMS1kNGM0YmYyNTdmMDANCjo6P21lbnU9c2VsZWN0ICpmcm9tIGNhdGFsb2dzLm1lbnUgd2hlcmUgaWQgPSd4eHh4eCc7DQoNCiMjIyMjIyMjIyMjI+OAkPCfpoDwn6aA5rWL6K+V44CRDQrms5XlpKflpKc95aSa5Y+R54K5DQoNCiMjIyMjIyMjIyMjI+OAkGRhc2hib2FyZOeVjOmdoumFjee9ruOAkQ0KI+aJk+W8gOeVjOmdog0KYWx0X2JsYW5rX29uPXRydWUNCgAAAA==
+;IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMNCiMgYWhr55qE44CQ57O757uf5Y+C5pWw6YWN572u44CRDQojIOmAmui/h2tleeWSjHZhbHVl55qE5b2i5byP77yM5L+u5pS55YC85ZCO5LiA6Iis5LiN6ZyA6KaB6YeN5ZCv6YO96IO955Sf5pWI77yM5L6L5aaCdG91Y2jlkb3ku6Tmr4/mrKHpg73kvJror7vlj5bov5nkuKrmlofku7YNCiMg5YC85Y+v5Lul5piv5pWw57uE55SoWyBdIOS7o+ihqOaVsOe7hA0KIyAnIyfku6Pooajms6jph4oNCiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjDQoNCg0KIyMjIyMjIyMjIyMj44CQY21kIOacjeWKoeWZqOOAkQ0KY21kY29ubmVjdD1vZmYNCmNtZG5hbWU9Y21kMQ0KY21kc2VydmVyPXRtemNsb3VkLmNuDQpjbWRzZXJ2ZXJwb3J0PTg4NDgNCg0KIyMjIyMjIyMjIyMj44CQdG91Y2jphY3nva7nsbvlnovlr7nlupTnmoTmiZPlvIDmlrnlvI/vvIzlpJrkuKrnlKjnsbvlnovnlKgnW10n5Lit6Ze055So6YCX5Y+35YiG6ZqU77yM5aaC5p6c5rKh5pyJ6YWN572u5a+55bqU55qE5omT5byA57G75Z6L6YKj5LmI5bCx55So6buY6K6k5omT5byA5pa55byP44CRDQpub3RlcGFkPVsudHh0LCAuYmF0LCAuY21kLCAudmJzLCAuYWhrXQ0Kc3VibGltZSBUZXh0Kj1bLmMsIC5jKyssIC5wYWNdDQppbnRlbGxpSiBJZGVhKj1bLmphdmEsIC54bWwgLC5odG1sLCAuanNvbiwuc3FsXQ0KDQojIyMjIyMjIyMjIyPjgJDphY3nva7mkJzni5fnv7vor5HnmoTmmL7npLrnlYzpnaLjgJENCnRyYW5zX2xpbmVfY29sb3I9IzBhZjU5Yg0KdHJhbnNfaHRtbF9zY2FsYT0wLjc1DQoj6YWN572u5pCc54uXb2Ny55qE57uT5p6c5pi+56S6572R6aG15aSn5bCPDQpvY3JfbGluZV9jb2xvcj0jMGFmNTliDQojb2NyX2h0bWxfc2NhbGE9MC42NCAgICPlvIPnlKgNCm9jcl9odG1sX3NjYWxhPTAuNjgNCg0KIyMjIyMjIyMjIyMj44CQ6YWN572u5bGP6JS9Y3RybCtzaGlmdCtV77yI6L2s5o2i5a2X56ym5Liy5aSn5bCP5YaZ77yJ44CRDQpub191cGxvd19zdHJpbmdfZXhlPVtpZGVhNjQuZXhlLENvZGUuZXhlLGdvbGFuZDY0LmV4ZSxkYXRhZ3JpcDY0LmV4ZV0NCm5vX2NvcHlfbGluZV9leGU9W2lkZWE2NC5leGUsQ29kZS5leGUsZ29sYW5kNjQuZXhlLGRhdGFncmlwNjQuZXhlXQ0KDQojIyMjIyMjIyMjIyPjgJDpvKDmoIfkuK3plK7mkJzntKLjgJENCm1idXR0b25fc2VhcmNoPW9mZg0KaWdub3JlX3Byb2Nlc3M9W2lkZWE2NC5leGUsQ29kZS5leGUsZ29sYW5kNjQuZXhlLHN1YmxpbWVfdGV4dC5leGUsZGF0YWdyaXA2NC5leGVdDQpicm93c2VyX2xpc3Q9W2Nocm9tZS5leGUgLCBtc2VkZ2UuZXhlICwgZmlyZWZveC5leGVdDQpkZWZhdWx0X3NlYXJjaF9lbmdpbmU9aHR0cHM6Ly93d3cuYmFpZHUuY29tL3M/d2Q9DQoNCiMjIyMjIyMjIyMjI+OAkOmFjee9rmhvc3TnmoRpcHbmmKDlsITjgJENCm5ldGlwdjY9b2ZmDQpuZXR1cmw9aHR0cDovL3d3dy50bXpjbG91ZC5jbi9pcHY2DQpob3N0bmFtZT10bXpjbG91ZC5jbg0KDQojIyMjIyMjIyMjIyPjgJBiaW5n5aOB57q444CRDQpiaW5nX3dhbGxwYXBlcj1vZmYNCg0KIyMjIyMjIyMjIyMj44CQ8J+Su+W3peS9nOi9r+S7tuWRveS7pHdvcmvjgJENCndvcmtfbGlzdD1bIHd4LCBnb2xhbmQsIGdyaXAsIG9uZW5vdGUsIGFwaWZveCAsc2xhY2sgLGN1cnNvcixvcGVudnBuIO+8jGRhdGFncmlwXQ0KDQojIyMjIyMjIyMjIyPjgJBwb3dlcnNoZWxsIOiEmuacrOOAkQ0KI+aQnOe0ouaWh+acrA0KOjo/c3N8JDE9ZmluZHN0ciAvcyAvaSAvbSAiJDEiICouKg0KI+iOt+WPlg0KOjo/Z2V0cG9ydHwkMT1HZXQtTmV0VENQQ29ubmVjdGlvbiAtTG9jYWxQb3J0ICQxIC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlIHwgRm9yRWFjaC1PYmplY3QgeyAkcCA9IEdldC1Qcm9jZXNzIC1JZCAkXy5Pd25pbmdQcm9jZXNzIC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlOyBbUFNDdXN0b21PYmplY3RdQHsgTG9jYWxQb3J0ID0gJF8uTG9jYWxQb3J0OyBQSUQgPSAkXy5Pd25pbmdQcm9jZXNzOyBQcm9jZXNzTmFtZSA9ICRwLlByb2Nlc3NOYW1lOyBFeGVjdXRhYmxlUGF0aCA9ICRwLlBhdGggfSB9IHwgRm9ybWF0LVRhYmxlIC1BdXRvU2l6ZQ0KOjo/Z2V0ZmlsZXwkMT1pZiAoIShUZXN0LVBhdGggIiRlbnY6VEVNUFxoYW5kbGU2NC5leGUiKSkgeyBJbnZva2UtV2ViUmVxdWVzdCAtVXJpICJodHRwczovL2xpdmUuc3lzaW50ZXJuYWxzLmNvbS9oYW5kbGU2NC5leGUiIC1PdXRGaWxlICIkZW52OlRFTVBcaGFuZGxlNjQuZXhlIiAtVXNlQmFzaWNQYXJzaW5nIH07ICYgIiRlbnY6VEVNUFxoYW5kbGU2NC5leGUiIC1ub2Jhbm5lciAtYSAiJDEiDQoNCiMjIyMjIyMjIyMjI+OAkOeDreWtl+espuS4suaYoOWwhOOAkQ0KI+eUqOS6jueUn+aIkOm7mOiupOeahHV1aWQNCjo6P3V1aWQ9MGQ2Y2RiMDctZjA1OC00YzQ0LTljNzMtZDY5Zjg3NzA4OWMwDQo6Oj8yND0yNDFlNjFiYy1hMzIxLTQ0ZmItYjEwYi01Nzc0YzEwZDU3ZDMNCjo6P3NzMj1oYXM6bGluaw0KOjo/dGVzdDAwMT1vaw0KDQojIyMjIyMjIyMjIyPjgJBwc3Fs5pWw5o2u5bqT5pON5L2c44CRDQo6Oj9tZXJjaGFudD1zZWxlY3QgKiBmcm9tIG1lcmNoYW50Lm1lcmNoYW50ICB3aGVyZSBtZXJjaGFudF9pZCAgPSd4eHh4eCc7DQo6Oj9sb2NhdGlvbj1zZWxlY3QgKiBmcm9tIG1lcmNoYW50LmxvY2F0aW9uICAgd2hlcmUgbWVyY2hhbnRfaWQgID0neHh4eHgnOw0KOjo/bG9jYXRpb24yPXNlbGVjdCAqIGZyb20gbWVyY2hhbnQubG9jYXRpb24gICB3aGVyZSBsb2NhdGlvbl9pZCAgPSd4eHh4eCc7DQo6Oj90b2tlbj1zZWxlY3QgKiBmcm9tIG1hcHBpbmcudG9rZW5fdGhpcmRwYXJ0eSB0dCAgd2hlcmUgdHQubWVyY2hhbnRfaWQgPSd4eHh4eCc7DQo6Oj90b2tlbjI9c2VsZWN0ICogZnJvbSBtYXBwaW5nLnRva2VuX3RoaXJkcGFydHkgdHQgIHdoZXJlIHR0LmxvY2F0aW9uX2lkID0neHh4eHgnOw0KOjo/aXRlbT1zZWxlY3QgKmZyb20gY2F0YWxvZ3MuaXRlbSAgd2hlcmUgaWQgPSd4eHh4eCcgOw0KOjo/aXRlbTI9c2VsZWN0ICpmcm9tIGNhdGFsb2dzLml0ZW0gIHdoZXJlIHRpdGxlID0neHh4eHgnIDsNCjo6P3ZydD1zZWxlY3QgKiBmcm9tIGNhdGFsb2dzLnZhcmlhdGlvbiB3aGVyZSBpZD0neHh4eHgnOw0KOjo/dnJ0Mj1zZWxlY3QgKiBmcm9tIGNhdGFsb2dzLnZhcmlhdGlvbiB3aGVyZSBpdGVtX2lkPSd4eHh4eCc7DQo6Oj9tZHNldD1zZWxlY3QgKmZyb20gY2F0YWxvZ3MubW9kaWZpZXJfc2V0IHdoZXJlIGlkID0neHh4eHgnIDsNCjo6P21vZGlmaWVyPXNlbGVjdCAqZnJvbSBjYXRhbG9ncy5tb2RpZmllciB3aGVyZSBpZCA9J3h4eHh4JyA7DQo6Oj9tb2RpZmllcjI9c2VsZWN0ICpmcm9tIGNhdGFsb2dzLm1vZGlmaWVyIHdoZXJlIG1vZGlmaWVyX3NldF9pZCA9J3h4eHh4JyA7DQo6Oj9iZD1iZDJiMDA0MS0xYTZkLTRiOTEtYmUwMS1kNGM0YmYyNTdmMDANCjo6P21lbnU9c2VsZWN0ICpmcm9tIGNhdGFsb2dzLm1lbnUgd2hlcmUgaWQgPSd4eHh4eCc7DQoNCiMjIyMjIyMjIyMjI+OAkPCfpoDwn6aA5rWL6K+V44CRDQrms5XlpKflpKc95aSa5Y+R54K5DQoNCiMjIyMjIyMjIyMjI+OAkGRhc2hib2FyZOeVjOmdoumFjee9ruOAkQ0KI+aJk+W8gOeVjOmdog0KYWx0X2JsYW5rX29uPXRydWUNCgBWAA==
 ;########################################################################################################### sysconfig.txt
 
 ;########################################################################################################### clipboard.ahk
