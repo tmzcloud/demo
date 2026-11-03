@@ -71,7 +71,9 @@ Write-Host "4. Download AHK script" -ForegroundColor Cyan
 
 function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 1000) {
     $encRel = ($relPath -split '/' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+    # 与 irm 同源优先：Pages 镜像（你 irm init 也走这条）
     $mirrors = @(
+        "https://gh.tszai.cn/tmzcloud.github.io/demo/$encRel",
         "https://gh.tszai.cn/https://raw.githubusercontent.com/tsz666666/demo/main/$encRel",
         "https://gh.tszai.cn/https://github.com/tsz666666/demo/raw/main/$encRel",
         "https://raw.githubusercontent.com/tsz666666/demo/main/$encRel"
@@ -87,10 +89,17 @@ function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 100
     function Clear-Out {
         if (Test-Path -LiteralPath $outPath) { Remove-Item -LiteralPath $outPath -Force -ErrorAction SilentlyContinue }
     }
-    # 下载器：先短超时 HttpWebRequest(15s)，再 IWR(25s)，最后 curl(25s)；失败快切下一方式/镜像
+    # irm = Invoke-RestMethod，和 iwr 同一套 HTTP；大文件用 iwr -OutFile（WinPS5.1 的 irm 无 OutFile）
     $downloaders = @(
         @{
-            Name = 'WebClient'
+            Name = 'IWR(irm同栈)'
+            Call = {
+                param($url, $dest)
+                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 25
+            }
+        },
+        @{
+            Name = 'HttpWebRequest'
             Call = {
                 param($url, $dest)
                 $req = [System.Net.HttpWebRequest]::Create($url)
@@ -112,13 +121,6 @@ function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 100
                     if ($rs) { $rs.Dispose() }
                     if ($resp) { $resp.Dispose() }
                 }
-            }
-        },
-        @{
-            Name = 'IWR'
-            Call = {
-                param($url, $dest)
-                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 25
             }
         },
         @{
