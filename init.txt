@@ -80,21 +80,59 @@ function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 100
     if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     }
-    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { throw "curl.exe not found" }
-    foreach ($u in $mirrors) {
-        try {
-            Write-Host "   -> $u" -ForegroundColor Yellow
-            if (Test-Path -LiteralPath $outPath) { Remove-Item -LiteralPath $outPath -Force -ErrorAction SilentlyContinue }
-            & curl.exe -fsSL --connect-timeout 20 --max-time 180 -o $outPath -- $u
-            if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
-            if ((Test-Path -LiteralPath $outPath) -and ((Get-Item -LiteralPath $outPath).Length -gt $minBytes)) {
-                Write-Host "   -> saved: $outPath ($([math]::Round((Get-Item -LiteralPath $outPath).Length/1KB,1)) KB)" -ForegroundColor Green
-                return $true
+
+    function Test-DownloadedOk {
+        return ((Test-Path -LiteralPath $outPath) -and ((Get-Item -LiteralPath $outPath).Length -gt $minBytes))
+    }
+    function Clear-Out {
+        if (Test-Path -LiteralPath $outPath) { Remove-Item -LiteralPath $outPath -Force -ErrorAction SilentlyContinue }
+    }
+    # 下载器：先 WebClient，再 IWR，最后 curl（curl 在部分环境失败率高）
+    $downloaders = @(
+        @{
+            Name = 'WebClient'
+            Call = {
+                param($url, $dest)
+                $wc = New-Object System.Net.WebClient
+                try {
+                    $wc.Headers.Add('User-Agent', 'Mozilla/5.0 init-download')
+                    $wc.DownloadFile($url, $dest)
+                } finally { $wc.Dispose() }
             }
-            throw "file missing or too small"
-        } catch {
-            Write-Host "   -> fail: $($_.Exception.Message)" -ForegroundColor DarkYellow
-            if (Test-Path -LiteralPath $outPath) { Remove-Item -LiteralPath $outPath -Force -ErrorAction SilentlyContinue }
+        },
+        @{
+            Name = 'IWR'
+            Call = {
+                param($url, $dest)
+                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 180
+            }
+        },
+        @{
+            Name = 'curl'
+            Call = {
+                param($url, $dest)
+                if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { throw 'curl.exe not found' }
+                & curl.exe -fsSL --connect-timeout 20 --max-time 180 -o $dest -- $url
+                if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
+            }
+        }
+    )
+
+    foreach ($u in $mirrors) {
+        foreach ($d in $downloaders) {
+            try {
+                Write-Host "   -> [$($d.Name)] $u" -ForegroundColor Yellow
+                Clear-Out
+                & $d.Call $u $outPath
+                if (Test-DownloadedOk) {
+                    Write-Host "   -> saved: $outPath ($([math]::Round((Get-Item -LiteralPath $outPath).Length/1KB,1)) KB) via $($d.Name)" -ForegroundColor Green
+                    return $true
+                }
+                throw 'file missing or too small'
+            } catch {
+                Write-Host "   -> fail [$($d.Name)]: $($_.Exception.Message)" -ForegroundColor DarkYellow
+                Clear-Out
+            }
         }
     }
     return $false
