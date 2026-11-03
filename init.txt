@@ -65,7 +65,7 @@ if ([string]::IsNullOrWhiteSpace($ahk2_bin_zip_A11111) -or $ahk2_bin_zip_A11111.
 
 
 # ==============================================================================
-# 4. Download 快捷键4.ahk + ahk_ext companions via gh.tszai.cn mirror
+# 4. Download 快捷键4.ahk via gh.tszai.cn mirror（ahk_ext 由脚本注释块吐出，勿预下）
 # ==============================================================================
 Write-Host "4. Download AHK script" -ForegroundColor Cyan
 
@@ -80,8 +80,7 @@ function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 100
     if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     }
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if (-not $curl) { throw "curl.exe not found" }
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { throw "curl.exe not found" }
     foreach ($u in $mirrors) {
         try {
             Write-Host "   -> $u" -ForegroundColor Yellow
@@ -106,16 +105,6 @@ try {
     if (-not (Get-GhMirrored "快捷键4.ahk" $scriptPath 1000)) { throw "all mirrors failed for 快捷键4.ahk" }
 } catch {
     Write-Error "   -> download AHK script failed: $_"
-}
-
-Write-Host "4b. Download ahk_ext companions" -ForegroundColor Cyan
-$extDir = Join-Path $baseDir "ahk_ext"
-foreach ($rel in @("ahk_ext/_download_ext.ahk", "ahk_ext/_python_ext.ahk")) {
-    $name = Split-Path $rel -Leaf
-    $dest = Join-Path $extDir $name
-    if (-not (Get-GhMirrored $rel $dest 500)) {
-        Write-Host "   -> warn: $name not downloaded (dashboard may fail until 快捷键4 sync)" -ForegroundColor DarkYellow
-    }
 }
 
 
