@@ -65,42 +65,12 @@ if ([string]::IsNullOrWhiteSpace($ahk2_bin_zip_A11111) -or $ahk2_bin_zip_A11111.
 
 
 # ==============================================================================
-# 4. 主脚本不存在 → 清旧 UI html + ahk_ext\*.ahk（不动 data）；再下载 快捷键5
+# 4. 下载 快捷键5（ahk_ext / html 由主脚本注释块同步吐出，init 不再删除）
 # ==============================================================================
 Write-Host "4. Download AHK script" -ForegroundColor Cyan
 
 $scriptPath = Join-Path $baseDir "快捷键5.ahk"
 $extDir = Join-Path $baseDir "ahk_ext"
-if (-not (Test-Path -LiteralPath $scriptPath)) {
-    Write-Host "   -> 快捷键5.ahk missing: purge stale ahk_ext scripts + UI html (keep data)" -ForegroundColor Yellow
-    if (Test-Path -LiteralPath $extDir) {
-        Get-ChildItem -LiteralPath $extDir -Filter '*.ahk' -File -ErrorAction SilentlyContinue |
-            ForEach-Object {
-                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-                Write-Host "   -> removed $($_.Name)" -ForegroundColor DarkYellow
-            }
-        # 旧名兼容
-        foreach ($old in @('_python_ext.ahk')) {
-            $p = Join-Path $extDir $old
-            if (Test-Path -LiteralPath $p) {
-                Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
-                Write-Host "   -> removed $old" -ForegroundColor DarkYellow
-            }
-        }
-    }
-    @(
-        (Join-Path $extDir 'data\local_search\index.html'),
-        (Join-Path $extDir 'data\clip_v1\index.html'),
-        (Join-Path $extDir 'ahk\local_search\index.html'),
-        (Join-Path $extDir 'ahk\clip_v1\index.html'),
-        (Join-Path $extDir '_clip_ui_decoded.html')
-    ) | ForEach-Object {
-        if (Test-Path -LiteralPath $_) {
-            Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue
-            Write-Host "   -> removed html $_" -ForegroundColor DarkYellow
-        }
-    }
-}
 
 function Get-GhMirrored([string]$relPath, [string]$outPath, [int]$minBytes = 1000) {
     $encRel = ($relPath -split '/' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
