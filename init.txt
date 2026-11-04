@@ -79,6 +79,14 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
                 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
                 Write-Host "   -> removed $($_.Name)" -ForegroundColor DarkYellow
             }
+        # 旧名兼容
+        foreach ($old in @('_python_ext.ahk')) {
+            $p = Join-Path $extDir $old
+            if (Test-Path -LiteralPath $p) {
+                Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                Write-Host "   -> removed $old" -ForegroundColor DarkYellow
+            }
+        }
     }
     @(
         (Join-Path $extDir 'data\local_search\index.html'),
