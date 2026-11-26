@@ -1623,6 +1623,20 @@ class init
              return A_TickCount
          return c * 1000 / f
      }
+     static IsLocalSearchUiForeground(*) {
+         ; 仅当前台是仪表盘时才允许双 Esc 收起，避免在资源管理器里按 Esc 误关仪表盘
+         for hwnd in WinGetList("仪表盘 ahk_class AutoHotkeyGUI") {
+             try {
+                 if WinActive("ahk_id " hwnd)
+                     return true
+             }
+         }
+         try {
+             if WinActive("仪表盘 ahk_class AutoHotkeyGUI")
+                 return true
+         }
+         return false
+     }
      static OnSidebarDoubleEsc(*) {
          if !this.SidebarDoubleEscHotIf()
              return
@@ -1630,9 +1644,11 @@ class init
          last := this.escQpcLast
          this.escQpcLast := now
          vis := this.IsLocalSearchUiVisible()
+         fg := this.IsLocalSearchUiForeground()
          ; 首击只武装：按「这一击时是否已藏/在屏外」记，第二击才动作
          if last = 0 || (now - last) > 450 {
              this.escPairStartHidden := !vis
+             this.escPairStartFocused := fg
              return
          }
          if (now - last) <= 0
@@ -1640,8 +1656,8 @@ class init
          this.escQpcLast := 0  ; 消费这一对，避免三连误触
          if this.escPairStartHidden
              this.ShowAiChatSidebarUi()  ; 无界面双 Esc：强制 AI，不看 want
-         else
-             this.HideLocalSearchUi()    ; 仪表盘 / AI 可见：关闭
+         else if this.escPairStartFocused || fg
+             this.HideLocalSearchUi()    ; 仅仪表盘在前台时收起（资源管理器前台不误关）
      }
      ; 双 Esc 唤出：落盘贴边标记后打开，直接进千问 AI 对话页（不是普通仪表盘）
      static ShowAiChatSidebarUi(*) {
